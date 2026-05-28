@@ -8,7 +8,7 @@ interface MyGamesScreenProps {
 }
 
 export const MyGamesScreen: React.FC<MyGamesScreenProps> = ({ games, onGameClick }) => {
-  const myGames = games.slice(0, 2);
+  const myGames = games;
 
   return (
     <div className="flex-1 overflow-y-auto pb-24">
@@ -36,7 +36,20 @@ export const MyGamesScreen: React.FC<MyGamesScreenProps> = ({ games, onGameClick
             Upcoming
           </span>
         </div>
-        {myGames.map((game) => {
+        {myGames.length === 0 ? (
+          <div
+            className="rounded-xl p-8 text-center"
+            style={{ backgroundColor: 'rgba(245, 239, 224, 0.04)', border: '1px solid rgba(245, 239, 224, 0.08)' }}
+          >
+            <span className="text-4xl block mb-3">📅</span>
+            <p className="text-sm font-semibold" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              No secured game activity yet
+            </p>
+            <p className="text-xs mt-1" style={{ color: 'rgba(245, 239, 224, 0.3)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              Join a game or create one as an organizer to build your activity feed.
+            </p>
+          </div>
+        ) : myGames.map((game) => {
           const isBasketball = game.sport === 'basketball';
           return (
             <div

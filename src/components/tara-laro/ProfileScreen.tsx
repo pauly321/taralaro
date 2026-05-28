@@ -1,18 +1,40 @@
 import React from 'react';
 import { Settings, Star, Users, Trophy, ChevronRight, LogOut } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/hooks/useAuth';
+import { PolicyModal } from '@/components/policy/PolicyModal';
+import { PolicyType } from '@/types/game';
 
 export const ProfileScreen: React.FC = () => {
+  const navigate = useNavigate();
+  const { user, logout } = useAuth();
+  const [activePolicy, setActivePolicy] = React.useState<PolicyType | null>(null);
+
   const stats = [
     { label: 'Games Joined', value: '14', icon: '🏀' },
     { label: 'Win Rate', value: '68%', icon: '🏆' },
     { label: 'Teams', value: '3', icon: '👥' },
   ];
 
+  const roleLabel = user?.role === 'admin' ? 'Admin' : user?.role === 'organizer' ? 'Organizer' : 'Player';
+  const sportLabel = user?.preferredSport === 'volleyball' ? '🏐 Volleyball' : '🏀 Basketball';
+
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
+  };
+
   const menuItems = [
     { icon: Star, label: 'Favorite Courts', color: '#F4722B' },
     { icon: Users, label: 'Friends', color: '#00B4A6' },
     { icon: Trophy, label: 'Achievements', color: '#F4722B' },
     { icon: Settings, label: 'Settings', color: 'rgba(245, 239, 224, 0.5)' },
+  ];
+
+  const policyItems: Array<{ type: PolicyType; label: string; description: string }> = [
+    { type: 'privacy', label: 'Privacy Notice', description: 'Review what account and activity data is stored.' },
+    { type: 'terms', label: 'Terms of Use', description: 'See the rules for platform use and organizer conduct.' },
+    { type: 'community_rules', label: 'Community Safety', description: 'View reporting and acceptable behavior expectations.' },
   ];
 
   return (
@@ -54,10 +76,13 @@ export const ProfileScreen: React.FC = () => {
             className="text-2xl font-black mb-1"
             style={{ color: '#F5EFE0', fontFamily: "'Bricolage Grotesque', sans-serif" }}
           >
-            Juan dela Cruz
+            {user?.displayName || 'Juan dela Cruz'}
           </h2>
           <p className="text-sm mb-1" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-            @juandc · Sampaloc, Manila
+            @{user?.username || 'juandc'} · {user?.barangay || 'Sampaloc'}, {user?.city || 'Manila'}
+          </p>
+          <p className="text-sm mb-2" style={{ color: 'rgba(245, 239, 224, 0.38)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+            {user?.email || 'juan@example.com'}
           </p>
           <div className="flex items-center gap-2">
             <span
@@ -69,7 +94,7 @@ export const ProfileScreen: React.FC = () => {
                 fontFamily: "'Plus Jakarta Sans', sans-serif",
               }}
             >
-              Player
+              {roleLabel}
             </span>
             <span
               className="text-xs px-2.5 py-1 rounded-full font-semibold"
@@ -80,7 +105,7 @@ export const ProfileScreen: React.FC = () => {
                 fontFamily: "'Plus Jakarta Sans', sans-serif",
               }}
             >
-              🏀 Basketball
+              {sportLabel}
             </span>
           </div>
         </div>
@@ -141,6 +166,34 @@ export const ProfileScreen: React.FC = () => {
           </button>
         ))}
 
+        <div className="pt-4">
+          <p className="mb-3 text-xs font-bold uppercase tracking-[0.22em]" style={{ color: 'rgba(245, 239, 224, 0.35)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+            Compliance Center
+          </p>
+          <div className="space-y-2">
+            {policyItems.map((item) => (
+              <button
+                key={item.type}
+                className="w-full rounded-2xl border p-4 text-left"
+                style={{ backgroundColor: 'rgba(0, 180, 166, 0.06)', borderColor: 'rgba(0, 180, 166, 0.16)' }}
+                onClick={() => setActivePolicy(item.type)}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-bold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                      {item.label}
+                    </p>
+                    <p className="mt-1 text-xs leading-5" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                      {item.description}
+                    </p>
+                  </div>
+                  <ChevronRight size={16} color="#00B4A6" />
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Logout */}
         <button
           className="w-full flex items-center gap-4 p-4 rounded-xl mt-4 active:scale-98 transition-transform"
@@ -148,6 +201,7 @@ export const ProfileScreen: React.FC = () => {
             backgroundColor: 'rgba(239, 68, 68, 0.06)',
             border: '1px solid rgba(239, 68, 68, 0.15)',
           }}
+          onClick={handleLogout}
         >
           <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ backgroundColor: 'rgba(239, 68, 68, 0.12)' }}>
             <LogOut size={18} color="#EF4444" />
@@ -157,6 +211,8 @@ export const ProfileScreen: React.FC = () => {
           </span>
         </button>
       </div>
+
+      {activePolicy ? <PolicyModal initialType={activePolicy} onClose={() => setActivePolicy(null)} /> : null}
     </div>
   );
 };

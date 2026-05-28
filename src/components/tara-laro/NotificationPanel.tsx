@@ -13,6 +13,8 @@ const notifIcons = {
   rejected: { icon: AlertCircle, color: '#EF4444' },
   reminder: { icon: Clock, color: '#F4722B' },
   join_request: { icon: Users, color: '#00B4A6' },
+  system: { icon: AlertCircle, color: '#F5EFE0' },
+  security: { icon: AlertCircle, color: '#F4722B' },
 };
 
 export const NotificationPanel: React.FC<NotificationPanelProps> = ({

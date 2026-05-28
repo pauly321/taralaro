@@ -1,0 +1,1482 @@
+import express from 'express';
+import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import cookieParser from 'cookie-parser';
+import fs from 'node:fs';
+import helmet from 'helmet';
+import http from 'node:http';
+import https from 'node:https';
+import jwt from 'jsonwebtoken';
+import rateLimit from 'express-rate-limit';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { getDb } from './db.js';
+import { jwtConfig, serverConfig } from './config.js';
+
+const rolePriority = ['admin', 'organizer', 'player'];
+const publicRoles = ['player', 'organizer'];
+const validSports = ['basketball', 'volleyball'];
+const validReportCategories = ['spam', 'fraud', 'harassment', 'unsafe_behavior', 'impersonation', 'other'];
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const usernamePattern = /^[a-zA-Z0-9._-]{3,30}$/;
+const refreshCookieName = 'tara_laro_refresh';
+
+const dateFormatter = new Intl.DateTimeFormat('en-US', {
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+});
+
+const timeFormatter = new Intl.DateTimeFormat('en-US', {
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
+const authRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many authentication attempts. Please wait before trying again.' },
+});
+
+const refreshRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many session refresh attempts. Please sign in again.' },
+});
+
+const reportRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 12,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many reports submitted. Please wait before sending more.' },
+});
+
+const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
+const normalizeString = (value) => String(value || '').trim();
+const safePreferredSport = (value) => (value === 'volleyball' ? 'volleyball' : 'basketball');
+const getPrimaryRole = (roles) => rolePriority.find((role) => roles.includes(role)) || 'player';
+
+const hashToken = (token) => createHash('sha256').update(token).digest('hex');
+const createRefreshToken = () => randomBytes(48).toString('hex');
+
+const getRefreshExpiryDate = () => {
+  const expiresAt = new Date();
+  expiresAt.setDate(expiresAt.getDate() + jwtConfig.refreshExpiresDays);
+  return expiresAt;
+};
+
+const getRefreshCookieOptions = (expiresAt) => ({
+  httpOnly: true,
+  secure: serverConfig.cookieSecure || serverConfig.requireHttps,
+  sameSite: 'lax',
+  domain: serverConfig.cookieDomain,
+  path: '/api/auth',
+  expires: expiresAt,
+});
+
+const setRefreshCookie = (res, token, expiresAt) => {
+  res.cookie(refreshCookieName, token, getRefreshCookieOptions(expiresAt));
+};
+
+const clearRefreshCookie = (res) => {
+  res.clearCookie(refreshCookieName, {
+    ...getRefreshCookieOptions(new Date(0)),
+    expires: new Date(0),
+  });
+};
+
+const formatDateLabel = (value) => {
+  try {
+    return dateFormatter.format(new Date(`${String(value).slice(0, 10)}T00:00:00`));
+  } catch {
+    return String(value);
+  }
+};
+
+const formatTimeLabel = (value) => {
+  try {
+    const normalized = String(value).slice(0, 8);
+    return timeFormatter.format(new Date(`1970-01-01T${normalized}`));
+  } catch {
+    return String(value);
+  }
+};
+
+const serializeGame = (row) => {
+  const slotsFilled = Number(row.slots_filled || 0);
+  const slotsTotal = Number(row.max_slots || 0);
+  let status = String(row.status || 'open').toUpperCase();
+
+  if ((status === 'OPEN' || status === 'FULL') && slotsTotal > 0 && slotsFilled >= slotsTotal) {
+    status = 'FULL';
+  }
+
+  return {
+    id: row.id,
+    title: row.title,
+    courtName: row.court_name,
+    sport: row.sport,
+    date: formatDateLabel(row.game_date),
+    time: formatTimeLabel(row.start_time),
+    location: row.location_text,
+    barangay: row.barangay,
+    city: row.city,
+    slotsTotal,
+    slotsFilled,
+    entryFee: row.entry_fee === null ? null : Number(row.entry_fee),
+    status,
+    organizerUserId: row.organizer_user_id,
+    organizerName: row.organizer_name,
+    description: row.description || '',
+    imageUrl: row.image_url || 'https://images.unsplash.com/photo-1546519638-68e109498ffc?w=800&q=80',
+    joinedStatus: row.joined_status || null,
+  };
+};
+
+const serializeNotification = (row) => ({
+  id: row.id,
+  type: row.notification_type,
+  message: row.message,
+  gameId: row.related_game_id || '',
+  gameTitle: row.related_game_title || row.title || 'Platform update',
+  read: Boolean(row.is_read),
+  time: row.created_at
+    ? new Date(row.created_at).toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      })
+    : 'Now',
+});
+
+const buildAuthUser = (rows) => {
+  const [firstRow] = rows;
+  const roles = [...new Set(rows.map((row) => row.role_name).filter(Boolean))];
+
+  return {
+    id: firstRow.id,
+    email: firstRow.email,
+    username: firstRow.username,
+    displayName: firstRow.display_name,
+    role: getPrimaryRole(roles),
+    city: firstRow.city || '',
+    barangay: firstRow.barangay || '',
+    preferredSport: safePreferredSport(firstRow.preferred_sport),
+  };
+};
+
+const issueAccessToken = (user) =>
+  jwt.sign(
+    {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      username: user.username,
+    },
+    jwtConfig.secret,
+    { expiresIn: jwtConfig.expiresIn }
+  );
+
+const buildAuthResponse = (rows) => {
+  const user = buildAuthUser(rows);
+  return {
+    user,
+    accessToken: issueAccessToken(user),
+  };
+};
+
+const getBearerToken = (req) => {
+  const header = req.get('authorization') || '';
+
+  if (!header.startsWith('Bearer ')) {
+    return null;
+  }
+
+  return header.slice(7).trim();
+};
+
+const validateRegistrationInput = (body) => {
+  const email = normalizeEmail(body?.email);
+  const password = String(body?.password || '');
+  const username = normalizeString(body?.username);
+  const displayName = normalizeString(body?.displayName);
+  const city = normalizeString(body?.city);
+  const barangay = normalizeString(body?.barangay);
+  const preferredSport = safePreferredSport(body?.preferredSport);
+  const role = publicRoles.includes(body?.role) ? body.role : 'player';
+
+  if (!emailPattern.test(email)) {
+    return { error: 'A valid email address is required.' };
+  }
+
+  if (password.length < 8) {
+    return { error: 'Password must be at least 8 characters long.' };
+  }
+
+  if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+    return { error: 'Password must include both letters and numbers.' };
+  }
+
+  if (!usernamePattern.test(username)) {
+    return { error: 'Username must be 3-30 characters using letters, numbers, dots, underscores, or hyphens.' };
+  }
+
+  if (displayName.length < 2 || displayName.length > 120) {
+    return { error: 'Display name must be between 2 and 120 characters.' };
+  }
+
+  if (!city || !barangay) {
+    return { error: 'City and barangay are required.' };
+  }
+
+  if (!validSports.includes(preferredSport)) {
+    return { error: 'Preferred sport must be basketball or volleyball.' };
+  }
+
+  return {
+    data: {
+      email,
+      password,
+      username,
+      displayName,
+      city,
+      barangay,
+      preferredSport,
+      role,
+    },
+  };
+};
+
+const validateGameInput = (body) => {
+  const title = normalizeString(body?.title);
+  const courtName = normalizeString(body?.courtName);
+  const sport = validSports.includes(body?.sport) ? body.sport : null;
+  const gameDate = normalizeString(body?.date);
+  const startTime = normalizeString(body?.time);
+  const locationText = normalizeString(body?.location);
+  const barangay = normalizeString(body?.barangay);
+  const city = normalizeString(body?.city);
+  const slots = Number(body?.slots);
+  const imageUrl = normalizeString(body?.imageUrl);
+  const description = normalizeString(body?.description);
+  const entryFeeRaw = body?.entryFee;
+  const entryFee = entryFeeRaw === null || entryFeeRaw === '' || typeof entryFeeRaw === 'undefined' ? null : Number(entryFeeRaw);
+
+  if (title.length < 5 || title.length > 150) {
+    return { error: 'Game title must be between 5 and 150 characters.' };
+  }
+
+  if (courtName.length < 3 || courtName.length > 150) {
+    return { error: 'Court name must be between 3 and 150 characters.' };
+  }
+
+  if (!sport) {
+    return { error: 'Sport must be basketball or volleyball.' };
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(gameDate)) {
+    return { error: 'A valid game date is required.' };
+  }
+
+  if (!/^\d{2}:\d{2}$/.test(startTime)) {
+    return { error: 'A valid start time is required.' };
+  }
+
+  if (locationText.length < 5 || locationText.length > 255) {
+    return { error: 'Location details must be between 5 and 255 characters.' };
+  }
+
+  if (barangay.length < 2 || barangay.length > 120 || city.length < 2 || city.length > 120) {
+    return { error: 'Barangay and city are required.' };
+  }
+
+  if (!Number.isInteger(slots) || slots < 6 || slots > 50) {
+    return { error: 'Slots must be a whole number between 6 and 50.' };
+  }
+
+  if (entryFee !== null && (!Number.isFinite(entryFee) || entryFee < 0)) {
+    return { error: 'Entry fee must be zero or greater.' };
+  }
+
+  if (description.length > 1000) {
+    return { error: 'Description must be 1000 characters or fewer.' };
+  }
+
+  return {
+    data: {
+      title,
+      courtName,
+      sport,
+      gameDate,
+      startTime: `${startTime}:00`,
+      locationText,
+      barangay,
+      city,
+      slots,
+      entryFee,
+      description,
+      imageUrl: imageUrl || null,
+    },
+  };
+};
+
+const validateReportInput = (body) => {
+  const targetType = body?.targetType;
+  const targetId = normalizeString(body?.targetId);
+  const category = body?.category;
+  const description = normalizeString(body?.description);
+
+  if (targetType !== 'game') {
+    return { error: 'Only game reports are supported in Phase 2.' };
+  }
+
+  if (!targetId) {
+    return { error: 'A report target is required.' };
+  }
+
+  if (!validReportCategories.includes(category)) {
+    return { error: 'A valid report category is required.' };
+  }
+
+  if (description.length < 10 || description.length > 1000) {
+    return { error: 'Report details must be between 10 and 1000 characters.' };
+  }
+
+  return {
+    data: {
+      targetType,
+      targetId,
+      category,
+      description,
+    },
+  };
+};
+
+const writeAuditLog = async ({ actorUserId = null, actionType, targetType, targetId = null, metadata = {}, req }) => {
+  try {
+    const db = getDb();
+    await db.execute(
+      `
+        INSERT INTO audit_logs (
+          id,
+          actor_user_id,
+          action_type,
+          target_type,
+          target_id,
+          metadata_json,
+          ip_address,
+          user_agent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        randomUUID(),
+        actorUserId,
+        actionType,
+        targetType,
+        targetId,
+        JSON.stringify(metadata),
+        req.ip || null,
+        req.get('user-agent') || null,
+      ]
+    );
+  } catch (error) {
+    console.warn(`Audit log skipped: ${error.message}`);
+  }
+};
+
+const writeNotification = async ({ userId, type, title, message, relatedGameId = null, relatedUserId = null }, connection = getDb()) => {
+  await connection.execute(
+    `
+      INSERT INTO notifications (
+        id,
+        user_id,
+        notification_type,
+        title,
+        message,
+        related_game_id,
+        related_user_id,
+        is_read,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, NOW())
+    `,
+    [randomUUID(), userId, type, title, message, relatedGameId, relatedUserId]
+  );
+};
+
+const fetchUserRowsByEmail = async (email, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        u.id,
+        u.email,
+        u.username,
+        u.display_name,
+        u.city,
+        u.barangay,
+        u.preferred_sport,
+        u.account_status,
+        u.password_hash,
+        r.role_name
+      FROM users u
+      LEFT JOIN user_roles ur ON ur.user_id = u.id
+      LEFT JOIN roles r ON r.id = ur.role_id
+      WHERE u.email = ?
+    `,
+    [email]
+  );
+
+  return rows;
+};
+
+const fetchUserRowsById = async (userId, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        u.id,
+        u.email,
+        u.username,
+        u.display_name,
+        u.city,
+        u.barangay,
+        u.preferred_sport,
+        u.account_status,
+        u.password_hash,
+        r.role_name
+      FROM users u
+      LEFT JOIN user_roles ur ON ur.user_id = u.id
+      LEFT JOIN roles r ON r.id = ur.role_id
+      WHERE u.id = ?
+    `,
+    [userId]
+  );
+
+  return rows;
+};
+
+const fetchRoleId = async (roleName, connection = getDb()) => {
+  const [rows] = await connection.execute('SELECT id FROM roles WHERE role_name = ? LIMIT 1', [roleName]);
+  return rows[0]?.id || null;
+};
+
+const fetchAdminUserIds = async (connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT u.id
+      FROM users u
+      INNER JOIN user_roles ur ON ur.user_id = u.id
+      INNER JOIN roles r ON r.id = ur.role_id
+      WHERE r.role_name = 'admin' AND u.account_status = 'active'
+    `
+  );
+
+  return rows.map((row) => row.id);
+};
+
+const findUserConflict = async (email, username, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    'SELECT email, username FROM users WHERE email = ? OR username = ? LIMIT 1',
+    [email, username]
+  );
+
+  return rows[0] || null;
+};
+
+const createAuthSession = async (userId, req, connection = getDb()) => {
+  const refreshToken = createRefreshToken();
+  const refreshTokenHash = hashToken(refreshToken);
+  const expiresAt = getRefreshExpiryDate();
+
+  await connection.execute(
+    `
+      INSERT INTO auth_sessions (
+        id,
+        user_id,
+        refresh_token_hash,
+        ip_address,
+        user_agent,
+        last_seen_at,
+        expires_at,
+        revoked_at,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, NOW(), ?, NULL, NOW())
+    `,
+    [randomUUID(), userId, refreshTokenHash, req.ip || null, req.get('user-agent') || null, expiresAt]
+  );
+
+  return { refreshToken, expiresAt };
+};
+
+const fetchAuthSessionByToken = async (refreshToken, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT id, user_id, expires_at, revoked_at
+      FROM auth_sessions
+      WHERE refresh_token_hash = ?
+      LIMIT 1
+    `,
+    [hashToken(refreshToken)]
+  );
+
+  return rows[0] || null;
+};
+
+const revokeAuthSessionById = async (sessionId, connection = getDb()) => {
+  await connection.execute('UPDATE auth_sessions SET revoked_at = NOW() WHERE id = ? AND revoked_at IS NULL', [sessionId]);
+};
+
+const rotateAuthSession = async (sessionId, req, connection = getDb()) => {
+  const refreshToken = createRefreshToken();
+  const refreshTokenHash = hashToken(refreshToken);
+  const expiresAt = getRefreshExpiryDate();
+
+  await connection.execute(
+    `
+      UPDATE auth_sessions
+      SET refresh_token_hash = ?,
+          ip_address = ?,
+          user_agent = ?,
+          last_seen_at = NOW(),
+          expires_at = ?,
+          revoked_at = NULL
+      WHERE id = ?
+    `,
+    [refreshTokenHash, req.ip || null, req.get('user-agent') || null, expiresAt, sessionId]
+  );
+
+  return { refreshToken, expiresAt };
+};
+
+const fetchFeedGames = async (userId, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        g.id,
+        g.organizer_user_id,
+        g.title,
+        g.sport,
+        g.court_name,
+        g.description,
+        g.game_date,
+        g.start_time,
+        g.location_text,
+        g.barangay,
+        g.city,
+        g.max_slots,
+        g.entry_fee,
+        g.image_url,
+        g.status,
+        organizer.display_name AS organizer_name,
+        COALESCE(SUM(CASE WHEN gp.join_status = 'approved' THEN 1 ELSE 0 END), 0) AS slots_filled,
+        MAX(self_gp.join_status) AS joined_status
+      FROM games g
+      INNER JOIN users organizer ON organizer.id = g.organizer_user_id
+      LEFT JOIN game_participants gp ON gp.game_id = g.id
+      LEFT JOIN game_participants self_gp ON self_gp.game_id = g.id AND self_gp.user_id = ?
+      WHERE g.visibility = 'public' AND g.status IN ('open', 'full')
+      GROUP BY
+        g.id,
+        g.organizer_user_id,
+        g.title,
+        g.sport,
+        g.court_name,
+        g.description,
+        g.game_date,
+        g.start_time,
+        g.location_text,
+        g.barangay,
+        g.city,
+        g.max_slots,
+        g.entry_fee,
+        g.image_url,
+        g.status,
+        organizer.display_name
+      ORDER BY g.game_date ASC, g.start_time ASC, g.created_at DESC
+    `,
+    [userId]
+  );
+
+  return rows.map(serializeGame);
+};
+
+const fetchMyGames = async (userId, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        g.id,
+        g.organizer_user_id,
+        g.title,
+        g.sport,
+        g.court_name,
+        g.description,
+        g.game_date,
+        g.start_time,
+        g.location_text,
+        g.barangay,
+        g.city,
+        g.max_slots,
+        g.entry_fee,
+        g.image_url,
+        g.status,
+        organizer.display_name AS organizer_name,
+        COALESCE(SUM(CASE WHEN gp.join_status = 'approved' THEN 1 ELSE 0 END), 0) AS slots_filled,
+        MAX(membership.join_status) AS joined_status
+      FROM games g
+      INNER JOIN users organizer ON organizer.id = g.organizer_user_id
+      LEFT JOIN game_participants gp ON gp.game_id = g.id
+      LEFT JOIN game_participants membership ON membership.game_id = g.id AND membership.user_id = ?
+      WHERE g.organizer_user_id = ? OR membership.user_id = ?
+      GROUP BY
+        g.id,
+        g.organizer_user_id,
+        g.title,
+        g.sport,
+        g.court_name,
+        g.description,
+        g.game_date,
+        g.start_time,
+        g.location_text,
+        g.barangay,
+        g.city,
+        g.max_slots,
+        g.entry_fee,
+        g.image_url,
+        g.status,
+        organizer.display_name
+      ORDER BY g.game_date ASC, g.start_time ASC, g.created_at DESC
+    `,
+    [userId, userId, userId]
+  );
+
+  return rows.map(serializeGame);
+};
+
+const fetchGameById = async (gameId, userId, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        g.id,
+        g.organizer_user_id,
+        g.title,
+        g.sport,
+        g.court_name,
+        g.description,
+        g.game_date,
+        g.start_time,
+        g.location_text,
+        g.barangay,
+        g.city,
+        g.max_slots,
+        g.entry_fee,
+        g.image_url,
+        g.status,
+        organizer.display_name AS organizer_name,
+        COALESCE(SUM(CASE WHEN gp.join_status = 'approved' THEN 1 ELSE 0 END), 0) AS slots_filled,
+        MAX(self_gp.join_status) AS joined_status
+      FROM games g
+      INNER JOIN users organizer ON organizer.id = g.organizer_user_id
+      LEFT JOIN game_participants gp ON gp.game_id = g.id
+      LEFT JOIN game_participants self_gp ON self_gp.game_id = g.id AND self_gp.user_id = ?
+      WHERE g.id = ?
+      GROUP BY
+        g.id,
+        g.organizer_user_id,
+        g.title,
+        g.sport,
+        g.court_name,
+        g.description,
+        g.game_date,
+        g.start_time,
+        g.location_text,
+        g.barangay,
+        g.city,
+        g.max_slots,
+        g.entry_fee,
+        g.image_url,
+        g.status,
+        organizer.display_name
+      LIMIT 1
+    `,
+    [userId, gameId]
+  );
+
+  return rows[0] ? serializeGame(rows[0]) : null;
+};
+
+const fetchNotifications = async (userId, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        n.id,
+        n.notification_type,
+        n.title,
+        n.message,
+        n.related_game_id,
+        n.related_user_id,
+        n.is_read,
+        n.created_at,
+        g.title AS related_game_title
+      FROM notifications n
+      LEFT JOIN games g ON g.id = n.related_game_id
+      WHERE n.user_id = ?
+      ORDER BY n.created_at DESC
+      LIMIT 50
+    `,
+    [userId]
+  );
+
+  return rows.map(serializeNotification);
+};
+
+const requireAuth = async (req, res, next) => {
+  const token = getBearerToken(req);
+
+  if (!token) {
+    res.status(401).json({ message: 'Missing bearer token.' });
+    return;
+  }
+
+  try {
+    const payload = jwt.verify(token, jwtConfig.secret);
+    const userRows = await fetchUserRowsById(payload.sub);
+
+    if (!userRows.length) {
+      res.status(401).json({ message: 'Session is no longer valid.' });
+      return;
+    }
+
+    const user = buildAuthUser(userRows);
+
+    if (userRows[0].account_status !== 'active') {
+      res.status(403).json({ message: 'Account is not active.' });
+      return;
+    }
+
+    req.authUser = user;
+    next();
+  } catch {
+    res.status(401).json({ message: 'Invalid or expired token.' });
+  }
+};
+
+export const createServer = () => {
+  const app = express();
+
+  app.disable('x-powered-by');
+  app.set('trust proxy', serverConfig.trustProxy);
+
+  app.use(
+    cors({
+      origin(origin, callback) {
+        if (!origin || serverConfig.corsOrigins.includes(origin)) {
+          callback(null, true);
+          return;
+        }
+
+        callback(new Error('Blocked by CORS policy.'));
+      },
+      credentials: true,
+    })
+  );
+
+  app.use((req, res, next) => {
+    if (!serverConfig.requireHttps) {
+      next();
+      return;
+    }
+
+    const forwardedProto = req.get('x-forwarded-proto');
+
+    if (req.secure || forwardedProto === 'https') {
+      next();
+      return;
+    }
+
+    const host = req.get('host');
+    res.redirect(301, `https://${host}${req.originalUrl}`);
+  });
+
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginEmbedderPolicy: false,
+      hsts: serverConfig.requireHttps,
+      referrerPolicy: { policy: 'no-referrer' },
+    })
+  );
+  app.use(cookieParser());
+  app.use(express.json());
+
+  app.get('/api/health', async (_req, res) => {
+    try {
+      const db = getDb();
+      await db.query('SELECT 1');
+      res.json({ ok: true, database: 'connected', httpsRequired: serverConfig.requireHttps });
+    } catch (error) {
+      res.status(500).json({ ok: false, message: error.message });
+    }
+  });
+
+  app.post('/api/auth/refresh', refreshRateLimiter, async (req, res) => {
+    const refreshToken = req.cookies?.[refreshCookieName];
+
+    if (!refreshToken) {
+      clearRefreshCookie(res);
+      res.status(401).json({ message: 'No refresh session available.' });
+      return;
+    }
+
+    try {
+      const session = await fetchAuthSessionByToken(refreshToken);
+
+      if (!session || session.revoked_at || new Date(session.expires_at) <= new Date()) {
+        clearRefreshCookie(res);
+        res.status(401).json({ message: 'Refresh session expired. Please sign in again.' });
+        return;
+      }
+
+      const userRows = await fetchUserRowsById(session.user_id);
+
+      if (!userRows.length || userRows[0].account_status !== 'active') {
+        await revokeAuthSessionById(session.id);
+        clearRefreshCookie(res);
+        res.status(401).json({ message: 'Session is no longer valid.' });
+        return;
+      }
+
+      const rotated = await rotateAuthSession(session.id, req);
+      const authPayload = buildAuthResponse(userRows);
+
+      setRefreshCookie(res, rotated.refreshToken, rotated.expiresAt);
+      await writeAuditLog({
+        actorUserId: authPayload.user.id,
+        actionType: 'auth_refresh_success',
+        targetType: 'user',
+        targetId: authPayload.user.id,
+        metadata: { sessionId: session.id },
+        req,
+      });
+
+      res.json(authPayload);
+    } catch (error) {
+      console.error('Refresh failed:', error);
+      clearRefreshCookie(res);
+      res.status(500).json({ message: 'Unable to refresh the session.' });
+    }
+  });
+
+  app.post('/api/auth/logout', async (req, res) => {
+    const refreshToken = req.cookies?.[refreshCookieName];
+
+    try {
+      if (refreshToken) {
+        const session = await fetchAuthSessionByToken(refreshToken);
+
+        if (session) {
+          await revokeAuthSessionById(session.id);
+          await writeAuditLog({
+            actorUserId: session.user_id,
+            actionType: 'auth_logout',
+            targetType: 'user',
+            targetId: session.user_id,
+            metadata: { sessionId: session.id },
+            req,
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Logout cleanup failed:', error);
+    }
+
+    clearRefreshCookie(res);
+    res.json({ success: true });
+  });
+
+  app.get('/api/auth/me', requireAuth, async (req, res) => {
+    res.json({ user: req.authUser });
+  });
+
+  app.post('/api/auth/register', authRateLimiter, async (req, res) => {
+    const validation = validateRegistrationInput(req.body);
+
+    if (validation.error) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+
+    const { email, password, username, displayName, city, barangay, preferredSport, role } = validation.data;
+    const db = getDb();
+    const connection = await db.getConnection();
+    let transactionStarted = false;
+
+    try {
+      const existingUser = await findUserConflict(email, username, connection);
+
+      if (existingUser) {
+        const conflictField = existingUser.email === email ? 'email' : 'username';
+        res.status(409).json({ message: `That ${conflictField} is already in use.` });
+        return;
+      }
+
+      const roleId = await fetchRoleId(role, connection);
+
+      if (!roleId) {
+        res.status(500).json({ message: 'Required roles are missing from the database.' });
+        return;
+      }
+
+      const userId = randomUUID();
+      const passwordHash = await bcrypt.hash(password, 12);
+
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await connection.execute(
+        `
+          INSERT INTO users (
+            id,
+            email,
+            password_hash,
+            username,
+            display_name,
+            city,
+            barangay,
+            preferred_sport,
+            account_status,
+            email_verified_at,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW(), NOW())
+        `,
+        [userId, email, passwordHash, username, displayName, city, barangay, preferredSport]
+      );
+      await connection.execute(
+        `INSERT INTO user_roles (user_id, role_id, assigned_at, assigned_by) VALUES (?, ?, NOW(), NULL)`,
+        [userId, roleId]
+      );
+
+      const session = await createAuthSession(userId, req, connection);
+      await connection.commit();
+
+      const userRows = await fetchUserRowsById(userId, connection);
+      const authPayload = buildAuthResponse(userRows);
+
+      setRefreshCookie(res, session.refreshToken, session.expiresAt);
+      await writeAuditLog({
+        actorUserId: authPayload.user.id,
+        actionType: 'auth_register_success',
+        targetType: 'user',
+        targetId: authPayload.user.id,
+        metadata: { email, role: authPayload.user.role },
+        req,
+      });
+
+      res.status(201).json(authPayload);
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await connection.rollback();
+        } catch {
+        }
+      }
+      console.error('Registration failed:', error);
+      res.status(500).json({ message: 'Unable to create the account right now.' });
+    } finally {
+      connection.release();
+    }
+  });
+
+  app.post('/api/auth/login', authRateLimiter, async (req, res) => {
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || '');
+
+    if (!email || !password.trim()) {
+      res.status(400).json({ message: 'Email and password are required.' });
+      return;
+    }
+
+    try {
+      const rows = await fetchUserRowsByEmail(email);
+
+      if (!rows.length) {
+        await writeAuditLog({
+          actionType: 'auth_login_failed',
+          targetType: 'user',
+          metadata: { email, reason: 'user_not_found' },
+          req,
+        });
+        res.status(401).json({ message: 'Invalid email or password.' });
+        return;
+      }
+
+      const [userRecord] = rows;
+
+      if (userRecord.account_status !== 'active') {
+        await writeAuditLog({
+          actorUserId: userRecord.id,
+          actionType: 'auth_login_blocked',
+          targetType: 'user',
+          targetId: userRecord.id,
+          metadata: { email, reason: `status_${userRecord.account_status}` },
+          req,
+        });
+        res.status(403).json({ message: 'Account is not active yet. Please verify or contact an administrator.' });
+        return;
+      }
+
+      const passwordMatches = await bcrypt.compare(password, userRecord.password_hash);
+
+      if (!passwordMatches) {
+        await writeAuditLog({
+          actorUserId: userRecord.id,
+          actionType: 'auth_login_failed',
+          targetType: 'user',
+          targetId: userRecord.id,
+          metadata: { email, reason: 'password_mismatch' },
+          req,
+        });
+        res.status(401).json({ message: 'Invalid email or password.' });
+        return;
+      }
+
+      const db = getDb();
+      await db.execute('UPDATE users SET last_login_at = NOW() WHERE id = ?', [userRecord.id]);
+      const authPayload = buildAuthResponse(rows);
+      const session = await createAuthSession(authPayload.user.id, req);
+
+      setRefreshCookie(res, session.refreshToken, session.expiresAt);
+      await writeAuditLog({
+        actorUserId: authPayload.user.id,
+        actionType: 'auth_login_success',
+        targetType: 'user',
+        targetId: authPayload.user.id,
+        metadata: { email, role: authPayload.user.role },
+        req,
+      });
+
+      res.json(authPayload);
+    } catch (error) {
+      console.error('Login failed:', error);
+      res.status(500).json({ message: 'Authentication service unavailable.' });
+    }
+  });
+
+  app.get('/api/games', requireAuth, async (req, res) => {
+    try {
+      const games = await fetchFeedGames(req.authUser.id);
+      res.json({ games });
+    } catch (error) {
+      console.error('Load games failed:', error);
+      res.status(500).json({ message: 'Unable to load games.' });
+    }
+  });
+
+  app.get('/api/games/mine', requireAuth, async (req, res) => {
+    try {
+      const games = await fetchMyGames(req.authUser.id);
+      res.json({ games });
+    } catch (error) {
+      console.error('Load my games failed:', error);
+      res.status(500).json({ message: 'Unable to load your games.' });
+    }
+  });
+
+  app.post('/api/games', requireAuth, async (req, res) => {
+    if (!['organizer', 'admin'].includes(req.authUser.role)) {
+      res.status(403).json({ message: 'Only organizers and admins can create games.' });
+      return;
+    }
+
+    const validation = validateGameInput(req.body);
+
+    if (validation.error) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+
+    const data = validation.data;
+    const db = getDb();
+    const connection = await db.getConnection();
+    let transactionStarted = false;
+
+    try {
+      const gameId = randomUUID();
+
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await connection.execute(
+        `
+          INSERT INTO games (
+            id,
+            organizer_user_id,
+            title,
+            sport,
+            court_name,
+            description,
+            game_date,
+            start_time,
+            location_text,
+            barangay,
+            city,
+            max_slots,
+            entry_fee,
+            image_url,
+            visibility,
+            status,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'public', 'open', NOW(), NOW())
+        `,
+        [
+          gameId,
+          req.authUser.id,
+          data.title,
+          data.sport,
+          data.courtName,
+          data.description || null,
+          data.gameDate,
+          data.startTime,
+          data.locationText,
+          data.barangay,
+          data.city,
+          data.slots,
+          data.entryFee,
+          data.imageUrl,
+        ]
+      );
+      await connection.execute(
+        `
+          INSERT INTO game_status_history (
+            id,
+            game_id,
+            previous_status,
+            new_status,
+            changed_by,
+            reason,
+            created_at
+          ) VALUES (?, ?, NULL, 'open', ?, 'game_created', NOW())
+        `,
+        [randomUUID(), gameId, req.authUser.id]
+      );
+      await connection.commit();
+
+      const game = await fetchGameById(gameId, req.authUser.id, connection);
+      await writeAuditLog({
+        actorUserId: req.authUser.id,
+        actionType: 'game_created',
+        targetType: 'game',
+        targetId: gameId,
+        metadata: { sport: data.sport, slots: data.slots },
+        req,
+      });
+
+      res.status(201).json({ game });
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await connection.rollback();
+        } catch {
+        }
+      }
+      console.error('Create game failed:', error);
+      res.status(500).json({ message: 'Unable to create the game right now.' });
+    } finally {
+      connection.release();
+    }
+  });
+
+  app.post('/api/games/:gameId/join', requireAuth, async (req, res) => {
+    const { gameId } = req.params;
+    const db = getDb();
+    const connection = await db.getConnection();
+    let transactionStarted = false;
+
+    try {
+      const [gameRows] = await connection.execute(
+        `
+          SELECT
+            g.id,
+            g.organizer_user_id,
+            g.title,
+            g.max_slots,
+            g.status,
+            COALESCE(SUM(CASE WHEN gp.join_status = 'approved' THEN 1 ELSE 0 END), 0) AS slots_filled
+          FROM games g
+          LEFT JOIN game_participants gp ON gp.game_id = g.id
+          WHERE g.id = ?
+          GROUP BY g.id, g.organizer_user_id, g.title, g.max_slots, g.status
+          LIMIT 1
+        `,
+        [gameId]
+      );
+
+      const game = gameRows[0];
+
+      if (!game) {
+        res.status(404).json({ message: 'Game not found.' });
+        return;
+      }
+
+      if (game.organizer_user_id === req.authUser.id) {
+        res.status(403).json({ message: 'You cannot join your own game.' });
+        return;
+      }
+
+      if (!['open', 'full'].includes(game.status)) {
+        res.status(409).json({ message: 'This game is not accepting join requests.' });
+        return;
+      }
+
+      if (Number(game.slots_filled) >= Number(game.max_slots)) {
+        res.status(409).json({ message: 'This game is already full.' });
+        return;
+      }
+
+      const [existingRows] = await connection.execute(
+        'SELECT id FROM game_participants WHERE game_id = ? AND user_id = ? LIMIT 1',
+        [gameId, req.authUser.id]
+      );
+
+      if (existingRows.length) {
+        res.status(409).json({ message: 'You already have a join request or membership for this game.' });
+        return;
+      }
+
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await connection.execute(
+        `
+          INSERT INTO game_participants (
+            id,
+            game_id,
+            user_id,
+            join_status,
+            requested_at,
+            notes
+          ) VALUES (?, ?, ?, 'pending', NOW(), ?)
+        `,
+        [randomUUID(), gameId, req.authUser.id, 'Submitted from Tara Laro Phase 2 join flow']
+      );
+      await writeNotification(
+        {
+          userId: game.organizer_user_id,
+          type: 'join_request',
+          title: 'New join request',
+          message: `${req.authUser.displayName} wants to join ${game.title}.`,
+          relatedGameId: gameId,
+          relatedUserId: req.authUser.id,
+        },
+        connection
+      );
+      await connection.commit();
+
+      await writeAuditLog({
+        actorUserId: req.authUser.id,
+        actionType: 'game_join_requested',
+        targetType: 'game',
+        targetId: gameId,
+        metadata: { organizerUserId: game.organizer_user_id },
+        req,
+      });
+
+      res.json({ message: 'Join request sent for organizer review.' });
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await connection.rollback();
+        } catch {
+        }
+      }
+      console.error('Join game failed:', error);
+      res.status(500).json({ message: 'Unable to send the join request.' });
+    } finally {
+      connection.release();
+    }
+  });
+
+  app.get('/api/notifications', requireAuth, async (req, res) => {
+    try {
+      const notifications = await fetchNotifications(req.authUser.id);
+      res.json({ notifications });
+    } catch (error) {
+      console.error('Load notifications failed:', error);
+      res.status(500).json({ message: 'Unable to load notifications.' });
+    }
+  });
+
+  app.get('/api/policies', async (_req, res) => {
+    try {
+      const db = getDb();
+      const [rows] = await db.execute(
+        `
+          SELECT id, policy_type, version_label, title, content_md, is_active, published_at
+          FROM policy_documents
+          WHERE is_active = 1
+          ORDER BY FIELD(policy_type, 'privacy', 'terms', 'community_rules'), published_at DESC
+        `
+      );
+
+      const policies = rows.map((row) => ({
+        id: row.id,
+        policyType: row.policy_type,
+        versionLabel: row.version_label,
+        title: row.title,
+        content: row.content_md,
+        isActive: Boolean(row.is_active),
+        publishedAt: row.published_at
+          ? new Date(row.published_at).toLocaleDateString('en-US', {
+              month: 'short',
+              day: 'numeric',
+              year: 'numeric',
+            })
+          : 'Draft',
+      }));
+
+      res.json({ policies });
+    } catch (error) {
+      console.error('Load policies failed:', error);
+      res.status(500).json({ message: 'Unable to load policy documents.' });
+    }
+  });
+
+  app.post('/api/policies/:policyId/accept', requireAuth, async (req, res) => {
+    const { policyId } = req.params;
+    const db = getDb();
+
+    try {
+      await db.execute(
+        `
+          INSERT INTO policy_acceptances (
+            id,
+            user_id,
+            policy_document_id,
+            accepted_at,
+            ip_address,
+            user_agent
+          ) VALUES (?, ?, ?, NOW(), ?, ?)
+          ON DUPLICATE KEY UPDATE
+            accepted_at = VALUES(accepted_at),
+            ip_address = VALUES(ip_address),
+            user_agent = VALUES(user_agent)
+        `,
+        [randomUUID(), req.authUser.id, policyId, req.ip || null, req.get('user-agent') || null]
+      );
+
+      await writeAuditLog({
+        actorUserId: req.authUser.id,
+        actionType: 'policy_acknowledged',
+        targetType: 'policy_document',
+        targetId: policyId,
+        metadata: { policyId },
+        req,
+      });
+
+      res.json({ accepted: true });
+    } catch (error) {
+      console.error('Policy acknowledgment failed:', error);
+      res.status(500).json({ message: 'Unable to record policy acknowledgment.' });
+    }
+  });
+
+  app.post('/api/reports', reportRateLimiter, requireAuth, async (req, res) => {
+    const validation = validateReportInput(req.body);
+
+    if (validation.error) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+
+    const { targetType, targetId, category, description } = validation.data;
+    const db = getDb();
+    const connection = await db.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+      await connection.execute(
+        `
+          INSERT INTO abuse_reports (
+            id,
+            reporter_user_id,
+            report_target_type,
+            report_target_id,
+            category,
+            description,
+            status,
+            created_at,
+            updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, 'submitted', NOW(), NOW())
+        `,
+        [randomUUID(), req.authUser.id, targetType, targetId, category, description]
+      );
+
+      const adminIds = await fetchAdminUserIds(connection);
+
+      for (const adminId of adminIds) {
+        await writeNotification(
+          {
+            userId: adminId,
+            type: 'security',
+            title: 'New abuse report',
+            message: `${req.authUser.displayName} submitted a ${category.replaceAll('_', ' ')} report for review.`,
+            relatedGameId: targetType === 'game' ? targetId : null,
+            relatedUserId: req.authUser.id,
+          },
+          connection
+        );
+      }
+
+      await connection.commit();
+
+      await writeAuditLog({
+        actorUserId: req.authUser.id,
+        actionType: 'report_submitted',
+        targetType,
+        targetId,
+        metadata: { category },
+        req,
+      });
+
+      res.status(201).json({ message: 'Report submitted for admin review.' });
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await connection.rollback();
+        } catch {
+        }
+      }
+      console.error('Submit report failed:', error);
+      res.status(500).json({ message: 'Unable to submit the report.' });
+    } finally {
+      connection.release();
+    }
+  });
+
+  return app;
+};
+
+const isDirectRun = process.argv[1] === fileURLToPath(import.meta.url);
+
+if (isDirectRun) {
+  const app = createServer();
+
+  const hasTlsFiles = Boolean(serverConfig.tlsKeyPath && serverConfig.tlsCertPath);
+
+  if (hasTlsFiles) {
+    const key = fs.readFileSync(serverConfig.tlsKeyPath);
+    const cert = fs.readFileSync(serverConfig.tlsCertPath);
+
+    https.createServer({ key, cert }, app).listen(serverConfig.port, () => {
+      console.log(`Tara Laro auth server listening on https://localhost:${serverConfig.port}`);
+    });
+  } else {
+    http.createServer(app).listen(serverConfig.port, () => {
+      console.log(`Tara Laro auth server listening on http://localhost:${serverConfig.port}`);
+    });
+  }
+}
