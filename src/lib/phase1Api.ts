@@ -1,6 +1,6 @@
 import { format, parse, parseISO } from 'date-fns';
 import { API_BASE_URL } from '@/lib/api';
-import { PolicyDocument, Game, Notification, ReportCategory } from '@/types/game';
+import { PolicyDocument, Game, GameJoinRequest, JoinRequestReviewDecision, Notification, ReportCategory } from '@/types/game';
 import { CreateGamePayload } from '@/lib/validation/game';
 
 type ApiHeaders = Record<string, string>;
@@ -114,6 +114,32 @@ export const joinGame = async (token: string, gameId: string) => {
     },
     token
   );
+};
+
+export const fetchGameJoinRequests = async (token: string, gameId: string) => {
+  const payload = await requestJson<{ requests: GameJoinRequest[] }>(`/games/${gameId}/requests`, undefined, token);
+  return payload.requests;
+};
+
+export const reviewGameJoinRequest = async (
+  token: string,
+  gameId: string,
+  requestId: string,
+  decision: JoinRequestReviewDecision
+) => {
+  const payload = await requestJson<{ message: string; request: { id: string; status: JoinRequestReviewDecision; userId: string; displayName: string }; game: ApiGame }>(
+    `/games/${gameId}/requests/${requestId}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ decision }),
+    },
+    token
+  );
+
+  return {
+    ...payload,
+    game: mapGame(payload.game),
+  };
 };
 
 export const fetchNotifications = async (token: string) => {

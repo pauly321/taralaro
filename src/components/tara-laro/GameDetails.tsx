@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -11,69 +11,141 @@ import {
   Users,
   XCircle,
 } from 'lucide-react';
-import { joinGame } from '@/lib/phase1Api';
+import { fetchGameJoinRequests, joinGame, reviewGameJoinRequest } from '@/lib/phase1Api';
 import { useAuth } from '@/hooks/useAuth';
-import { Game } from '@/types/game';
+import { Game, GameJoinRequest, JoinRequestReviewDecision } from '@/types/game';
 import { ReportIssueModal } from './ReportIssueModal';
 
 interface GameDetailsProps {
   game: Game;
   onBack: () => void;
-  onJoinSuccess?: () => void;
+  onGameUpdated?: () => void;
 }
 
-export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSuccess }) => {
+export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUpdated }) => {
   const { accessToken, user } = useAuth();
   const [showConfirmSheet, setShowConfirmSheet] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
-  const [joined, setJoined] = useState(game.joinedStatus === 'pending' || game.joinedStatus === 'approved');
+  const [currentGame, setCurrentGame] = useState(game);
+  const [joinedStatus, setJoinedStatus] = useState(game.joinedStatus ?? null);
+  const [joinRequests, setJoinRequests] = useState<GameJoinRequest[]>([]);
+  const [isLoadingJoinRequests, setIsLoadingJoinRequests] = useState(false);
+  const [activeReviewId, setActiveReviewId] = useState<string | null>(null);
   const [liked, setLiked] = useState(false);
-  const [requestError, setRequestError] = useState('');
+  const [joinError, setJoinError] = useState('');
+  const [reviewError, setReviewError] = useState('');
   const [isJoining, setIsJoining] = useState(false);
 
-  const isBasketball = game.sport === 'basketball';
-  const fillPercent = (game.slotsFilled / Math.max(game.slotsTotal, 1)) * 100;
+  useEffect(() => {
+    setCurrentGame(game);
+    setJoinedStatus(game.joinedStatus ?? null);
+    setJoinError('');
+    setReviewError('');
+    setShowConfirmSheet(false);
+  }, [game]);
+
+  const isBasketball = currentGame.sport === 'basketball';
+  const fillPercent = (currentGame.slotsFilled / Math.max(currentGame.slotsTotal, 1)) * 100;
   const accentColor = isBasketball ? '#F4722B' : '#00B4A6';
-  const isOrganizerOwner = user?.id && game.organizerUserId ? user.id === game.organizerUserId : false;
-  const isGameUnavailable = ['FULL', 'CANCELLED', 'COMPLETED'].includes(game.status);
+  const isOrganizerOwner = user?.id && currentGame.organizerUserId ? user.id === currentGame.organizerUserId : false;
+  const isGameUnavailable = ['FULL', 'CANCELLED', 'COMPLETED'].includes(currentGame.status);
+  const isJoined = joinedStatus === 'pending' || joinedStatus === 'approved';
 
   const joinLabel = useMemo(() => {
-    if (game.joinedStatus === 'approved') {
+    if (joinedStatus === 'approved') {
       return 'You are in this game';
     }
 
-    if (game.joinedStatus === 'pending') {
+    if (joinedStatus === 'pending') {
       return 'Join request pending';
     }
 
     return 'Join Game';
-  }, [game.joinedStatus]);
+  }, [joinedStatus]);
+
+  useEffect(() => {
+    if (!isOrganizerOwner || !accessToken) {
+      setJoinRequests([]);
+      setIsLoadingJoinRequests(false);
+      return undefined;
+    }
+
+    let isMounted = true;
+
+    const loadJoinRequests = async () => {
+      setIsLoadingJoinRequests(true);
+      setReviewError('');
+
+      try {
+        const nextRequests = await fetchGameJoinRequests(accessToken, currentGame.id);
+
+        if (isMounted) {
+          setJoinRequests(nextRequests);
+        }
+      } catch (error) {
+        if (isMounted) {
+          setReviewError(error instanceof Error ? error.message : 'Unable to load join requests.');
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingJoinRequests(false);
+        }
+      }
+    };
+
+    loadJoinRequests();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [accessToken, currentGame.id, isOrganizerOwner]);
 
   const handleJoin = async () => {
     if (!accessToken) {
-      setRequestError('Your session expired. Please sign in again.');
+      setJoinError('Your session expired. Please sign in again.');
       return;
     }
 
-    setRequestError('');
+    setJoinError('');
     setIsJoining(true);
 
     try {
-      await joinGame(accessToken, game.id);
+      await joinGame(accessToken, currentGame.id);
       setShowConfirmSheet(false);
-      setJoined(true);
-      onJoinSuccess?.();
+      setJoinedStatus('pending');
+      onGameUpdated?.();
     } catch (error) {
-      setRequestError(error instanceof Error ? error.message : 'Unable to send your join request.');
+      setJoinError(error instanceof Error ? error.message : 'Unable to send your join request.');
     } finally {
       setIsJoining(false);
+    }
+  };
+
+  const handleReviewRequest = async (requestId: string, decision: JoinRequestReviewDecision) => {
+    if (!accessToken) {
+      setReviewError('Your session expired. Please sign in again.');
+      return;
+    }
+
+    setReviewError('');
+    setActiveReviewId(requestId);
+
+    try {
+      const payload = await reviewGameJoinRequest(accessToken, currentGame.id, requestId, decision);
+      setCurrentGame(payload.game);
+      setJoinRequests((current) => current.filter((request) => request.id !== requestId));
+      onGameUpdated?.();
+    } catch (error) {
+      setReviewError(error instanceof Error ? error.message : 'Unable to review this join request.');
+    } finally {
+      setActiveReviewId(null);
     }
   };
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col max-w-md mx-auto" style={{ backgroundColor: '#0D1B2A' }}>
       <div className="relative h-56 flex-shrink-0">
-        <img src={game.imageUrl} alt={game.title} className="w-full h-full object-cover" />
+        <img src={currentGame.imageUrl} alt={currentGame.title} className="w-full h-full object-cover" />
         <div className="absolute inset-0" style={{ background: 'linear-gradient(to bottom, rgba(13,27,42,0.5) 0%, rgba(13,27,42,0.95) 100%)' }} />
 
         <button className="absolute top-4 left-4 w-10 h-10 rounded-full flex items-center justify-center active:scale-90 transition-transform" style={{ backgroundColor: 'rgba(13,27,42,0.7)', backdropFilter: 'blur(8px)' }} onClick={onBack}>
@@ -97,7 +169,7 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
             </span>
           </div>
           <h1 className="text-2xl font-black text-white leading-tight" style={{ fontFamily: "'Bricolage Grotesque', sans-serif" }}>
-            {game.title}
+            {currentGame.title}
           </h1>
         </div>
       </div>
@@ -111,7 +183,7 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
           </div>
 
           <p className="text-sm" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-            📍 {game.courtName}
+            📍 {currentGame.courtName}
           </p>
 
           <div className="grid grid-cols-2 gap-3">
@@ -120,8 +192,8 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
                 <Clock size={14} color={accentColor} />
                 <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: accentColor, fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Date & Time</span>
               </div>
-              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{game.date}</p>
-              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{game.time}</p>
+              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.date}</p>
+              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.time}</p>
             </div>
 
             <div className="p-3 rounded-xl" style={{ backgroundColor: 'rgba(245, 239, 224, 0.06)', border: '1px solid rgba(245, 239, 224, 0.08)' }}>
@@ -129,8 +201,8 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
                 <MapPin size={14} color={accentColor} />
                 <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: accentColor, fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Location</span>
               </div>
-              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{game.barangay}</p>
-              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{game.city}</p>
+              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.barangay}</p>
+              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.city}</p>
             </div>
           </div>
 
@@ -141,42 +213,42 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
                 <span className="text-sm font-bold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Player Slots</span>
               </div>
               <span className="text-lg font-black" style={{ color: accentColor, fontFamily: "'Bricolage Grotesque', sans-serif" }}>
-                {game.slotsFilled}/{game.slotsTotal}
+                {currentGame.slotsFilled}/{currentGame.slotsTotal}
               </span>
             </div>
             <div className="slot-bar mb-2"><div className="slot-bar-fill" style={{ width: `${fillPercent}%`, backgroundColor: accentColor }} /></div>
-            <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{Math.max(game.slotsTotal - game.slotsFilled, 0)} slots remaining</p>
+            <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{Math.max(currentGame.slotsTotal - currentGame.slotsFilled, 0)} slots remaining</p>
           </div>
 
           <div className="flex gap-3">
             <div className="flex-1 p-3 rounded-xl text-center" style={{ backgroundColor: 'rgba(244, 114, 43, 0.1)', border: '1px solid rgba(244, 114, 43, 0.2)' }}>
               <p className="text-xs mb-1" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Entry Fee</p>
-              <p className="text-xl font-black" style={{ color: '#F4722B', fontFamily: "'Bricolage Grotesque', sans-serif" }}>{game.entryFee === null ? 'FREE' : `PHP ${game.entryFee}`}</p>
+              <p className="text-xl font-black" style={{ color: '#F4722B', fontFamily: "'Bricolage Grotesque', sans-serif" }}>{currentGame.entryFee === null ? 'FREE' : `PHP ${currentGame.entryFee}`}</p>
             </div>
-            <div className="flex-1 p-3 rounded-xl text-center" style={{ backgroundColor: game.status === 'OPEN' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)', border: `1px solid ${game.status === 'OPEN' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)'}` }}>
+            <div className="flex-1 p-3 rounded-xl text-center" style={{ backgroundColor: currentGame.status === 'OPEN' ? 'rgba(34, 197, 94, 0.1)' : 'rgba(239, 68, 68, 0.1)', border: `1px solid ${currentGame.status === 'OPEN' ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)'}` }}>
               <p className="text-xs mb-1" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Status</p>
-              <p className="text-xl font-black" style={{ color: game.status === 'OPEN' ? '#22C55E' : '#EF4444', fontFamily: "'Bricolage Grotesque', sans-serif" }}>{game.status}</p>
+              <p className="text-xl font-black" style={{ color: currentGame.status === 'OPEN' ? '#22C55E' : '#EF4444', fontFamily: "'Bricolage Grotesque', sans-serif" }}>{currentGame.status}</p>
             </div>
           </div>
 
-          {game.description ? (
+          {currentGame.description ? (
             <div>
               <h3 className="text-sm font-bold mb-2 uppercase tracking-wider" style={{ color: 'rgba(245, 239, 224, 0.4)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
                 About this game
               </h3>
               <p className="text-sm leading-relaxed" style={{ color: 'rgba(245, 239, 224, 0.75)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                {game.description}
+                {currentGame.description}
               </p>
             </div>
           ) : null}
 
           <div className="flex items-center gap-3 p-4 rounded-xl" style={{ backgroundColor: 'rgba(245, 239, 224, 0.06)', border: '1px solid rgba(245, 239, 224, 0.08)' }}>
             <div className="w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold flex-shrink-0" style={{ backgroundColor: `${accentColor}30`, color: accentColor }}>
-              {game.organizerName[0]}
+              {currentGame.organizerName[0]}
             </div>
             <div>
               <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.45)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Organized by</p>
-              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{game.organizerName}</p>
+              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.organizerName}</p>
             </div>
             <div className="ml-auto">
               <span className="text-xs px-2 py-1 rounded-full font-medium" style={{ backgroundColor: 'rgba(244, 114, 43, 0.15)', color: '#F4722B', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
@@ -185,21 +257,116 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
             </div>
           </div>
 
+          {isOrganizerOwner ? (
+            <div className="rounded-2xl border p-4" style={{ backgroundColor: 'rgba(0, 180, 166, 0.08)', borderColor: 'rgba(0, 180, 166, 0.2)' }}>
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <div>
+                  <h3 className="text-sm font-bold uppercase tracking-wider" style={{ color: '#00B4A6', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                    Pending join requests
+                  </h3>
+                  <p className="text-xs mt-1" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                    Approve players before the game fills up.
+                  </p>
+                </div>
+                <div className="px-3 py-1 rounded-full text-xs font-bold" style={{ backgroundColor: 'rgba(0, 180, 166, 0.14)', color: '#00B4A6', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                  {joinRequests.length}
+                </div>
+              </div>
+
+              {isLoadingJoinRequests ? (
+                <div className="rounded-xl px-4 py-5 text-sm" style={{ backgroundColor: 'rgba(245, 239, 224, 0.04)', color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                  Loading join requests...
+                </div>
+              ) : joinRequests.length === 0 ? (
+                <div className="rounded-xl px-4 py-5 text-sm" style={{ backgroundColor: 'rgba(245, 239, 224, 0.04)', color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                  No pending players right now.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {joinRequests.map((request) => {
+                    const isReviewing = activeReviewId === request.id;
+                    const isAnyReviewing = activeReviewId !== null;
+                    const sportLabel = request.preferredSport === 'basketball' ? 'Basketball' : 'Volleyball';
+
+                    return (
+                      <div
+                        key={request.id}
+                        className="rounded-xl border p-4"
+                        style={{ backgroundColor: 'rgba(13, 27, 42, 0.36)', borderColor: 'rgba(245, 239, 224, 0.08)' }}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0" style={{ backgroundColor: `${accentColor}25`, color: accentColor, fontFamily: "'Bricolage Grotesque', sans-serif" }}>
+                            {request.displayName[0]}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-start justify-between gap-2">
+                              <div>
+                                <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                                  {request.displayName}
+                                </p>
+                                <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.45)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                                  @{request.username}
+                                </p>
+                              </div>
+                              <span className="text-[11px] font-bold px-2 py-1 rounded-full uppercase tracking-wide" style={{ backgroundColor: 'rgba(244, 114, 43, 0.14)', color: '#F4722B', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                                {sportLabel}
+                              </span>
+                            </div>
+                            <div className="mt-3 flex flex-wrap gap-2 text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                              <span>{request.barangay}, {request.city}</span>
+                              <span>•</span>
+                              <span>Requested {request.requestedAt}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex gap-3 mt-4">
+                          <button
+                            className="flex-1 py-3 rounded-2xl font-bold text-sm active:scale-95 transition-transform"
+                            style={{ backgroundColor: 'rgba(239, 68, 68, 0.12)', border: '1px solid rgba(239, 68, 68, 0.24)', color: '#FCA5A5', fontFamily: "'Plus Jakarta Sans', sans-serif", opacity: isAnyReviewing ? 0.6 : 1 }}
+                            onClick={() => handleReviewRequest(request.id, 'rejected')}
+                            disabled={isAnyReviewing}
+                          >
+                            {isReviewing ? 'Working...' : 'Decline'}
+                          </button>
+                          <button
+                            className="flex-1 py-3 rounded-2xl font-bold text-sm active:scale-95 transition-transform"
+                            style={{ backgroundColor: '#22C55E', color: '#fff', fontFamily: "'Plus Jakarta Sans', sans-serif", boxShadow: '0 6px 18px rgba(34, 197, 94, 0.3)', opacity: isAnyReviewing ? 0.6 : 1 }}
+                            onClick={() => handleReviewRequest(request.id, 'approved')}
+                            disabled={isAnyReviewing}
+                          >
+                            {isReviewing ? 'Working...' : 'Approve'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : null}
+
           <button className="w-full flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold" style={{ backgroundColor: 'rgba(239, 68, 68, 0.06)', borderColor: 'rgba(239, 68, 68, 0.18)', color: '#FCA5A5', fontFamily: "'Plus Jakarta Sans', sans-serif" }} onClick={() => setShowReportModal(true)}>
             <ShieldAlert size={16} />
             Report this game
           </button>
 
-          {requestError ? (
+          {joinError ? (
             <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.24)', color: '#FCA5A5', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-              <div className="flex items-center gap-2"><AlertTriangle size={16} />{requestError}</div>
+              <div className="flex items-center gap-2"><AlertTriangle size={16} />{joinError}</div>
+            </div>
+          ) : null}
+
+          {reviewError ? (
+            <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.24)', color: '#FCA5A5', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              <div className="flex items-center gap-2"><AlertTriangle size={16} />{reviewError}</div>
             </div>
           ) : null}
         </div>
       </div>
 
       <div className="fixed bottom-0 left-0 right-0 max-w-md mx-auto px-5 py-4" style={{ background: 'linear-gradient(to top, rgba(13,27,42,1) 60%, rgba(13,27,42,0) 100%)' }}>
-        {joined ? (
+        {isJoined ? (
           <div className="w-full py-4 rounded-2xl flex items-center justify-center gap-2" style={{ backgroundColor: 'rgba(34, 197, 94, 0.2)', border: '1px solid #22C55E' }}>
             <CheckCircle size={20} color="#22C55E" />
             <span className="font-bold text-base" style={{ color: '#22C55E', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
@@ -219,7 +386,7 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
           </button>
         ) : (
           <button className="w-full py-4 rounded-2xl font-bold text-base active:scale-95 transition-transform" style={{ backgroundColor: accentColor, color: '#fff', fontFamily: "'Plus Jakarta Sans', sans-serif", boxShadow: `0 8px 24px ${accentColor}40` }} onClick={() => setShowConfirmSheet(true)}>
-            Join Game
+            {joinLabel}
           </button>
         )}
       </div>
@@ -233,13 +400,13 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
               Confirm Join Request
             </h3>
             <p className="text-sm text-center mb-6" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-              Your request will be sent to <strong style={{ color: '#F5EFE0' }}>{game.organizerName}</strong> for review and logged for audit tracking.
+              Your request will be sent to <strong style={{ color: '#F5EFE0' }}>{currentGame.organizerName}</strong> for review and logged for audit tracking.
             </p>
 
             <div className="p-4 rounded-xl mb-5" style={{ backgroundColor: 'rgba(244, 114, 43, 0.08)', border: '1px solid rgba(244, 114, 43, 0.2)' }}>
-              <p className="font-bold text-sm mb-1" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{game.title}</p>
-              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{game.date} · {game.time} · {game.city}</p>
-              {game.entryFee !== null ? <p className="text-xs mt-1 font-semibold" style={{ color: '#F4722B', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Entry fee: PHP {game.entryFee}</p> : null}
+              <p className="font-bold text-sm mb-1" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.title}</p>
+              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.date} · {currentGame.time} · {currentGame.city}</p>
+              {currentGame.entryFee !== null ? <p className="text-xs mt-1 font-semibold" style={{ color: '#F4722B', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Entry fee: PHP {currentGame.entryFee}</p> : null}
             </div>
 
             <div className="flex gap-3">
@@ -254,7 +421,7 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onJoinSu
         </>
       ) : null}
 
-      {showReportModal ? <ReportIssueModal game={game} onClose={() => setShowReportModal(false)} /> : null}
+      {showReportModal ? <ReportIssueModal game={currentGame} onClose={() => setShowReportModal(false)} /> : null}
     </div>
   );
 };

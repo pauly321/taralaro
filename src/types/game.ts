@@ -3,6 +3,7 @@ export type GameStatus = 'OPEN' | 'FULL' | 'DRAFT' | 'CANCELLED' | 'COMPLETED';
 export type UserRole = 'player' | 'organizer' | 'admin';
 export type JoinStatus = 'pending' | 'approved' | 'rejected' | 'cancelled' | 'left_game';
 export type NotificationType = 'join_request' | 'accepted' | 'rejected' | 'reminder' | 'system' | 'security';
+export type JoinRequestReviewDecision = 'approved' | 'rejected';
 export type PolicyType = 'privacy' | 'terms' | 'community_rules';
 export type ReportCategory = 'spam' | 'fraud' | 'harassment' | 'unsafe_behavior' | 'impersonation' | 'other';
 
@@ -36,6 +37,18 @@ export interface Notification {
   gameTitle: string;
   read: boolean;
   time: string;
+}
+
+export interface GameJoinRequest {
+  id: string;
+  userId: string;
+  displayName: string;
+  username: string;
+  city: string;
+  barangay: string;
+  preferredSport: Sport;
+  status: JoinStatus;
+  requestedAt: string;
 }
 
 export interface PolicyDocument {

@@ -1,5 +1,6 @@
 import React from 'react';
 import { Calendar, Trophy } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
 import { Game } from '@/types/game';
 
 interface MyGamesScreenProps {
@@ -8,6 +9,7 @@ interface MyGamesScreenProps {
 }
 
 export const MyGamesScreen: React.FC<MyGamesScreenProps> = ({ games, onGameClick }) => {
+  const { user } = useAuth();
   const myGames = games;
 
   return (
@@ -51,6 +53,14 @@ export const MyGamesScreen: React.FC<MyGamesScreenProps> = ({ games, onGameClick
           </div>
         ) : myGames.map((game) => {
           const isBasketball = game.sport === 'basketball';
+          const isOrganizerOwner = Boolean(user?.id && game.organizerUserId && user.id === game.organizerUserId);
+          const membershipLabel = isOrganizerOwner
+            ? 'Organizer view'
+            : game.joinedStatus === 'approved'
+              ? 'Joined'
+              : game.joinedStatus === 'pending'
+                ? 'Request pending'
+                : null;
           return (
             <div
               key={game.id}
@@ -74,6 +84,18 @@ export const MyGamesScreen: React.FC<MyGamesScreenProps> = ({ games, onGameClick
                     <p className="text-xs" style={{ color: 'rgba(13,27,42,0.55)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
                       {game.date} · {game.time}
                     </p>
+                    {membershipLabel ? (
+                      <span
+                        className="inline-flex mt-2 px-2.5 py-1 rounded-full text-[11px] font-bold"
+                        style={{
+                          backgroundColor: isOrganizerOwner ? 'rgba(0, 180, 166, 0.12)' : 'rgba(244, 114, 43, 0.12)',
+                          color: isOrganizerOwner ? '#00B4A6' : '#F4722B',
+                          fontFamily: "'Plus Jakarta Sans', sans-serif",
+                        }}
+                      >
+                        {membershipLabel}
+                      </span>
+                    ) : null}
                   </div>
                   <span className="text-xl">{isBasketball ? '🏀' : '🏐'}</span>
                 </div>

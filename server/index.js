@@ -17,6 +17,7 @@ const rolePriority = ['admin', 'organizer', 'player'];
 const publicRoles = ['player', 'organizer'];
 const validSports = ['basketball', 'volleyball'];
 const validReportCategories = ['spam', 'fraud', 'harassment', 'unsafe_behavior', 'impersonation', 'other'];
+const validJoinReviewDecisions = ['approved', 'rejected'];
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const usernamePattern = /^[a-zA-Z0-9._-]{3,30}$/;
 const refreshCookieName = 'tara_laro_refresh';
@@ -147,6 +148,25 @@ const serializeNotification = (row) => ({
   read: Boolean(row.is_read),
   time: row.created_at
     ? new Date(row.created_at).toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      })
+    : 'Now',
+});
+
+const serializeJoinRequest = (row) => ({
+  id: row.id,
+  userId: row.user_id,
+  displayName: row.display_name,
+  username: row.username,
+  city: row.city || '',
+  barangay: row.barangay || '',
+  preferredSport: safePreferredSport(row.preferred_sport),
+  status: row.join_status,
+  requestedAt: row.requested_at
+    ? new Date(row.requested_at).toLocaleString('en-US', {
         month: 'short',
         day: 'numeric',
         hour: 'numeric',
@@ -354,6 +374,20 @@ const validateReportInput = (body) => {
       targetId,
       category,
       description,
+    },
+  };
+};
+
+const validateJoinReviewInput = (body) => {
+  const decision = validJoinReviewDecisions.includes(body?.decision) ? body.decision : null;
+
+  if (!decision) {
+    return { error: 'A valid organizer review decision is required.' };
+  }
+
+  return {
+    data: {
+      decision,
     },
   };
 };
@@ -706,6 +740,33 @@ const fetchGameById = async (gameId, userId, connection = getDb()) => {
   );
 
   return rows[0] ? serializeGame(rows[0]) : null;
+};
+
+const fetchPendingJoinRequests = async (gameId, organizerUserId, connection = getDb()) => {
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        gp.id,
+        gp.user_id,
+        gp.join_status,
+        gp.requested_at,
+        requester.display_name,
+        requester.username,
+        requester.city,
+        requester.barangay,
+        requester.preferred_sport
+      FROM game_participants gp
+      INNER JOIN games g ON g.id = gp.game_id
+      INNER JOIN users requester ON requester.id = gp.user_id
+      WHERE gp.game_id = ?
+        AND g.organizer_user_id = ?
+        AND gp.join_status = 'pending'
+      ORDER BY gp.requested_at ASC
+    `,
+    [gameId, organizerUserId]
+  );
+
+  return rows.map(serializeJoinRequest);
 };
 
 const fetchNotifications = async (userId, connection = getDb()) => {
@@ -1293,6 +1354,202 @@ export const createServer = () => {
       }
       console.error('Join game failed:', error);
       res.status(500).json({ message: 'Unable to send the join request.' });
+    } finally {
+      connection.release();
+    }
+  });
+
+  app.get('/api/games/:gameId/requests', requireAuth, async (req, res) => {
+    const { gameId } = req.params;
+    const db = getDb();
+
+    try {
+      const [gameRows] = await db.execute('SELECT id, organizer_user_id FROM games WHERE id = ? LIMIT 1', [gameId]);
+      const game = gameRows[0];
+
+      if (!game) {
+        res.status(404).json({ message: 'Game not found.' });
+        return;
+      }
+
+      if (game.organizer_user_id !== req.authUser.id) {
+        res.status(403).json({ message: 'Only the organizer can review join requests for this game.' });
+        return;
+      }
+
+      const requests = await fetchPendingJoinRequests(gameId, req.authUser.id, db);
+      res.json({ requests });
+    } catch (error) {
+      console.error('Load join requests failed:', error);
+      res.status(500).json({ message: 'Unable to load join requests right now.' });
+    }
+  });
+
+  app.patch('/api/games/:gameId/requests/:requestId', requireAuth, async (req, res) => {
+    const { gameId, requestId } = req.params;
+    const validation = validateJoinReviewInput(req.body);
+
+    if (validation.error) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+
+    const { decision } = validation.data;
+    const db = getDb();
+    const connection = await db.getConnection();
+    let transactionStarted = false;
+    const rollbackAndRespond = async (statusCode, message) => {
+      if (transactionStarted) {
+        try {
+          await connection.rollback();
+        } catch {
+        }
+        transactionStarted = false;
+      }
+
+      res.status(statusCode).json({ message });
+    };
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const [gameRows] = await connection.execute(
+        `
+          SELECT id, organizer_user_id, title, max_slots, status
+          FROM games
+          WHERE id = ?
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [gameId]
+      );
+      const game = gameRows[0];
+
+      if (!game) {
+        await rollbackAndRespond(404, 'Game not found.');
+        return;
+      }
+
+      if (game.organizer_user_id !== req.authUser.id) {
+        await rollbackAndRespond(403, 'Only the organizer can review join requests for this game.');
+        return;
+      }
+
+      if (decision === 'approved' && !['open', 'full'].includes(game.status)) {
+        await rollbackAndRespond(409, 'This game is no longer accepting approved participants.');
+        return;
+      }
+
+      const [requestRows] = await connection.execute(
+        `
+          SELECT gp.id, gp.user_id, gp.join_status, requester.display_name
+          FROM game_participants gp
+          INNER JOIN users requester ON requester.id = gp.user_id
+          WHERE gp.id = ? AND gp.game_id = ?
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [requestId, gameId]
+      );
+      const joinRequest = requestRows[0];
+
+      if (!joinRequest) {
+        await rollbackAndRespond(404, 'Join request not found.');
+        return;
+      }
+
+      if (joinRequest.join_status !== 'pending') {
+        await rollbackAndRespond(409, 'This join request has already been reviewed.');
+        return;
+      }
+
+      let approvedSlots = 0;
+
+      if (decision === 'approved') {
+        const [countRows] = await connection.execute(
+          `
+            SELECT COUNT(*) AS approved_slots
+            FROM game_participants
+            WHERE game_id = ? AND join_status = 'approved'
+            FOR UPDATE
+          `,
+          [gameId]
+        );
+
+        approvedSlots = Number(countRows[0]?.approved_slots || 0);
+
+        if (approvedSlots >= Number(game.max_slots)) {
+          await rollbackAndRespond(409, 'No slots remain for this game.');
+          return;
+        }
+      }
+
+      await connection.execute(
+        `
+          UPDATE game_participants
+          SET join_status = ?,
+              reviewed_at = NOW(),
+              reviewed_by = ?
+          WHERE id = ?
+        `,
+        [decision, req.authUser.id, requestId]
+      );
+
+      if (decision === 'approved' && approvedSlots + 1 >= Number(game.max_slots) && game.status !== 'full') {
+        await connection.execute('UPDATE games SET status = ? WHERE id = ?', ['full', gameId]);
+      }
+
+      await writeNotification(
+        {
+          userId: joinRequest.user_id,
+          type: decision,
+          title: decision === 'approved' ? 'Join request approved' : 'Join request declined',
+          message:
+            decision === 'approved'
+              ? `${req.authUser.displayName} approved your join request for ${game.title}.`
+              : `${req.authUser.displayName} declined your join request for ${game.title}.`,
+          relatedGameId: gameId,
+          relatedUserId: req.authUser.id,
+        },
+        connection
+      );
+
+      await connection.commit();
+
+      const updatedGame = await fetchGameById(gameId, req.authUser.id, connection);
+
+      await writeAuditLog({
+        actorUserId: req.authUser.id,
+        actionType: decision === 'approved' ? 'game_join_approved' : 'game_join_rejected',
+        targetType: 'game_participant',
+        targetId: requestId,
+        metadata: {
+          gameId,
+          participantUserId: joinRequest.user_id,
+        },
+        req,
+      });
+
+      res.json({
+        message: decision === 'approved' ? 'Player approved for the game.' : 'Join request declined.',
+        request: {
+          id: requestId,
+          status: decision,
+          userId: joinRequest.user_id,
+          displayName: joinRequest.display_name,
+        },
+        game: updatedGame,
+      });
+    } catch (error) {
+      if (transactionStarted) {
+        try {
+          await connection.rollback();
+        } catch {
+        }
+      }
+      console.error('Review join request failed:', error);
+      res.status(500).json({ message: 'Unable to review this join request right now.' });
     } finally {
       connection.release();
     }

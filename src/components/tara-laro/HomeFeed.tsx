@@ -105,7 +105,7 @@ export const HomeFeed: React.FC = () => {
   };
 
   if (selectedGame) {
-    return <GameDetails game={selectedGame} onBack={() => setSelectedGame(null)} onJoinSuccess={() => loadPhase1Data(false)} />;
+    return <GameDetails game={selectedGame} onBack={() => setSelectedGame(null)} onGameUpdated={() => loadPhase1Data(false)} />;
   }
 
   if (showCreateGame) {
