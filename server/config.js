@@ -43,6 +43,23 @@ export const jwtConfig = {
   refreshExpiresDays: parsePort(process.env.JWT_REFRESH_EXPIRES_DAYS, 7),
 };
 
+export const otpConfig = {
+  codeLength: parsePort(process.env.EMAIL_OTP_LENGTH, 6),
+  expiryMinutes: parsePort(process.env.EMAIL_OTP_EXPIRY_MINUTES, 10),
+  maxAttempts: parsePort(process.env.EMAIL_OTP_MAX_ATTEMPTS, 5),
+  devMode: parseBoolean(process.env.EMAIL_OTP_DEV_MODE, process.env.NODE_ENV !== 'production'),
+};
+
+export const emailConfig = {
+  host: process.env.SMTP_HOST || '',
+  port: parsePort(process.env.SMTP_PORT, 587),
+  secure: parseBoolean(process.env.SMTP_SECURE, false),
+  user: process.env.SMTP_USER || '',
+  password: process.env.SMTP_PASSWORD || '',
+  fromEmail: process.env.SMTP_FROM_EMAIL || 'no-reply@taralaro.local',
+  fromName: process.env.SMTP_FROM_NAME || 'Tara Laro',
+};
+
 export const dbConfig = {
   host: required('MYSQL_HOST', '127.0.0.1'),
   port: parsePort(process.env.MYSQL_PORT, 3306),

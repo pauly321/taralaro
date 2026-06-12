@@ -7,19 +7,22 @@ import helmet from 'helmet';
 import http from 'node:http';
 import https from 'node:https';
 import jwt from 'jsonwebtoken';
+import nodemailer from 'nodemailer';
 import rateLimit from 'express-rate-limit';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { getDb } from './db.js';
-import { jwtConfig, serverConfig } from './config.js';
+import { emailConfig, jwtConfig, otpConfig, serverConfig } from './config.js';
 
 const rolePriority = ['admin', 'organizer', 'player'];
 const publicRoles = ['player', 'organizer'];
 const validSports = ['basketball', 'volleyball'];
 const validReportCategories = ['spam', 'fraud', 'harassment', 'unsafe_behavior', 'impersonation', 'other'];
 const validJoinReviewDecisions = ['approved', 'rejected'];
+const validOtpPurposes = ['login', 'register'];
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const usernamePattern = /^[a-zA-Z0-9._-]{3,30}$/;
+const otpPattern = new RegExp(`^\\d{${otpConfig.codeLength}}$`);
 const refreshCookieName = 'tara_laro_refresh';
 
 const dateFormatter = new Intl.DateTimeFormat('en-US', {
@@ -49,6 +52,14 @@ const refreshRateLimiter = rateLimit({
   message: { message: 'Too many session refresh attempts. Please sign in again.' },
 });
 
+const otpRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many verification attempts. Please wait before requesting another code.' },
+});
+
 const reportRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 12,
@@ -63,7 +74,128 @@ const safePreferredSport = (value) => (value === 'volleyball' ? 'volleyball' : '
 const getPrimaryRole = (roles) => rolePriority.find((role) => roles.includes(role)) || 'player';
 
 const hashToken = (token) => createHash('sha256').update(token).digest('hex');
+const hashOtpCode = (code) => createHash('sha256').update(String(code)).digest('hex');
 const createRefreshToken = () => randomBytes(48).toString('hex');
+
+const createHttpError = (statusCode, message) => Object.assign(new Error(message), { statusCode });
+
+const maskEmail = (email) => {
+  const [localPart = '', domain = ''] = String(email || '').split('@');
+
+  if (!localPart || !domain) {
+    return email;
+  }
+
+  const visibleLocal = localPart.slice(0, 2);
+  const maskedLocal = `${visibleLocal}${'*'.repeat(Math.max(localPart.length - visibleLocal.length, 1))}`;
+  const [domainName = '', domainSuffix = ''] = domain.split('.');
+  const visibleDomain = domainName ? `${domainName[0]}${'*'.repeat(Math.max(domainName.length - 1, 1))}` : '***';
+
+  return `${maskedLocal}@${visibleDomain}${domainSuffix ? `.${domainSuffix}` : ''}`;
+};
+
+const generateOtpCode = () => Array.from({ length: otpConfig.codeLength }, () => String(randomInt(0, 10))).join('');
+
+const getOtpExpiryDate = () => {
+  const expiresAt = new Date();
+  expiresAt.setMinutes(expiresAt.getMinutes() + otpConfig.expiryMinutes);
+  return expiresAt;
+};
+
+let emailTransporter;
+let ensureEmailOtpTablePromise;
+
+const getEmailTransporter = () => {
+  if (!emailConfig.host) {
+    return null;
+  }
+
+  if (!emailTransporter) {
+    emailTransporter = nodemailer.createTransport({
+      host: emailConfig.host,
+      port: emailConfig.port,
+      secure: emailConfig.secure,
+      auth: emailConfig.user
+        ? {
+            user: emailConfig.user,
+            pass: emailConfig.password,
+          }
+        : undefined,
+    });
+  }
+
+  return emailTransporter;
+};
+
+const ensureEmailOtpTable = async () => {
+  if (!ensureEmailOtpTablePromise) {
+    ensureEmailOtpTablePromise = getDb().execute(
+      `
+        CREATE TABLE IF NOT EXISTS auth_email_otps (
+          id CHAR(36) NOT NULL,
+          user_id CHAR(36) NULL,
+          email VARCHAR(255) NOT NULL,
+          purpose ENUM('login', 'register') NOT NULL,
+          otp_hash VARCHAR(255) NOT NULL,
+          context_json LONGTEXT NULL,
+          attempts_remaining TINYINT UNSIGNED NOT NULL DEFAULT 5,
+          expires_at DATETIME NOT NULL,
+          consumed_at DATETIME NULL,
+          created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id),
+          KEY idx_auth_email_otps_user_id (user_id),
+          KEY idx_auth_email_otps_email_purpose (email, purpose),
+          KEY idx_auth_email_otps_expires_at (expires_at),
+          CONSTRAINT fk_auth_email_otps_user FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+      `
+    );
+  }
+
+  await ensureEmailOtpTablePromise;
+};
+
+const sendOtpEmail = async ({ email, otpCode, purpose }) => {
+  const transporter = getEmailTransporter();
+  const actionLabel = purpose === 'login' ? 'sign in' : 'complete your registration';
+  const subject = purpose === 'login' ? 'Your Tara Laro login code' : 'Your Tara Laro registration code';
+  const text = [
+    `Your Tara Laro verification code is ${otpCode}.`,
+    `Use it to ${actionLabel}.`,
+    `This code expires in ${otpConfig.expiryMinutes} minutes.`,
+    'If you did not request this code, you can ignore this email.',
+  ].join('\n\n');
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #0d1b2a; line-height: 1.6;">
+      <p>Your Tara Laro verification code is:</p>
+      <p style="font-size: 28px; font-weight: 700; letter-spacing: 0.35em; margin: 16px 0;">${otpCode}</p>
+      <p>Use it to ${actionLabel}. It expires in ${otpConfig.expiryMinutes} minutes.</p>
+      <p>If you did not request this code, you can ignore this email.</p>
+    </div>
+  `;
+
+  if (!transporter) {
+    if (!otpConfig.devMode) {
+      throw new Error('SMTP is not configured for OTP delivery.');
+    }
+
+    console.info(`[OTP:${purpose}] ${email} -> ${otpCode}`);
+    return { deliveryMethod: 'console', devOtpPreview: otpCode };
+  }
+
+  await transporter.sendMail({
+    from: `${emailConfig.fromName} <${emailConfig.fromEmail}>`,
+    to: email,
+    subject,
+    text,
+    html,
+  });
+
+  return {
+    deliveryMethod: 'smtp',
+    devOtpPreview: otpConfig.devMode ? otpCode : undefined,
+  };
+};
 
 const getRefreshExpiryDate = () => {
   const expiresAt = new Date();
@@ -269,6 +401,32 @@ const validateRegistrationInput = (body) => {
       barangay,
       preferredSport,
       role,
+    },
+  };
+};
+
+const validateOtpRequestInput = (body) => {
+  const challengeId = normalizeString(body?.challengeId);
+  const otp = normalizeString(body?.otp);
+  const purpose = validOtpPurposes.includes(body?.purpose) ? body.purpose : null;
+
+  if (!challengeId) {
+    return { error: 'A verification challenge is required.' };
+  }
+
+  if (!otpPattern.test(otp)) {
+    return { error: `Verification codes must be ${otpConfig.codeLength} digits.` };
+  }
+
+  if (!purpose) {
+    return { error: 'A valid verification purpose is required.' };
+  }
+
+  return {
+    data: {
+      challengeId,
+      otp,
+      purpose,
     },
   };
 };
@@ -519,6 +677,154 @@ const findUserConflict = async (email, username, connection = getDb()) => {
   );
 
   return rows[0] || null;
+};
+
+const consumeEmailOtpChallenge = async (challengeId, connection = getDb()) => {
+  await connection.execute('UPDATE auth_email_otps SET consumed_at = NOW() WHERE id = ? AND consumed_at IS NULL', [challengeId]);
+};
+
+const fetchEmailOtpChallengeById = async (challengeId, connection = getDb()) => {
+  await ensureEmailOtpTable();
+
+  const [rows] = await connection.execute(
+    `
+      SELECT
+        id,
+        user_id,
+        email,
+        purpose,
+        otp_hash,
+        context_json,
+        attempts_remaining,
+        expires_at,
+        consumed_at,
+        created_at
+      FROM auth_email_otps
+      WHERE id = ?
+      LIMIT 1
+      FOR UPDATE
+    `,
+    [challengeId]
+  );
+
+  return rows[0] || null;
+};
+
+const createEmailOtpChallenge = async ({ email, purpose, userId = null, context = null }, connection = getDb()) => {
+  await ensureEmailOtpTable();
+
+  const challengeId = randomUUID();
+  const otpCode = generateOtpCode();
+  const expiresAt = getOtpExpiryDate();
+
+  await connection.execute(
+    `
+      UPDATE auth_email_otps
+      SET consumed_at = NOW()
+      WHERE email = ? AND purpose = ? AND consumed_at IS NULL
+    `,
+    [email, purpose]
+  );
+
+  await connection.execute(
+    `
+      INSERT INTO auth_email_otps (
+        id,
+        user_id,
+        email,
+        purpose,
+        otp_hash,
+        context_json,
+        attempts_remaining,
+        expires_at,
+        consumed_at,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NOW())
+    `,
+    [
+      challengeId,
+      userId,
+      email,
+      purpose,
+      hashOtpCode(otpCode),
+      context ? JSON.stringify(context) : null,
+      otpConfig.maxAttempts,
+      expiresAt,
+    ]
+  );
+
+  return { challengeId, otpCode, expiresAt };
+};
+
+const issueEmailOtpChallenge = async ({ email, purpose, userId = null, context = null }, connection = getDb()) => {
+  const challenge = await createEmailOtpChallenge({ email, purpose, userId, context }, connection);
+
+  try {
+    const delivery = await sendOtpEmail({ email, otpCode: challenge.otpCode, purpose });
+
+    return {
+      ...challenge,
+      ...delivery,
+      maskedEmail: maskEmail(email),
+    };
+  } catch (error) {
+    await consumeEmailOtpChallenge(challenge.challengeId, connection);
+    throw error;
+  }
+};
+
+const resolveEmailOtpChallenge = async ({ challengeId, otp, purpose }, connection = getDb()) => {
+  const challenge = await fetchEmailOtpChallengeById(challengeId, connection);
+
+  if (!challenge || challenge.purpose !== purpose) {
+    throw createHttpError(404, 'Verification request not found. Please request a new code.');
+  }
+
+  if (challenge.consumed_at) {
+    throw createHttpError(409, 'This verification code was already used. Please request a new one.');
+  }
+
+  if (new Date(challenge.expires_at) <= new Date()) {
+    await consumeEmailOtpChallenge(challengeId, connection);
+    throw createHttpError(410, 'This verification code has expired. Please request a new one.');
+  }
+
+  if (Number(challenge.attempts_remaining) <= 0) {
+    await consumeEmailOtpChallenge(challengeId, connection);
+    throw createHttpError(429, 'Too many invalid verification attempts. Please request a new code.');
+  }
+
+  if (hashOtpCode(otp) !== challenge.otp_hash) {
+    const nextAttempts = Math.max(Number(challenge.attempts_remaining) - 1, 0);
+
+    await connection.execute(
+      `
+        UPDATE auth_email_otps
+        SET attempts_remaining = ?,
+            consumed_at = CASE WHEN ? = 0 THEN NOW() ELSE consumed_at END
+        WHERE id = ?
+      `,
+      [nextAttempts, nextAttempts, challengeId]
+    );
+
+    if (nextAttempts === 0) {
+      throw createHttpError(429, 'Too many invalid verification attempts. Please request a new code.');
+    }
+
+    throw createHttpError(401, 'Invalid verification code. Please try again.');
+  }
+
+  let context = null;
+
+  if (challenge.context_json) {
+    try {
+      context = JSON.parse(challenge.context_json);
+    } catch {
+      throw createHttpError(500, 'Stored verification data is invalid. Please request a new code.');
+    }
+  }
+
+  return { challenge, context };
 };
 
 const createAuthSession = async (userId, req, connection = getDb()) => {
@@ -971,12 +1277,9 @@ export const createServer = () => {
     }
 
     const { email, password, username, displayName, city, barangay, preferredSport, role } = validation.data;
-    const db = getDb();
-    const connection = await db.getConnection();
-    let transactionStarted = false;
 
     try {
-      const existingUser = await findUserConflict(email, username, connection);
+      const existingUser = await findUserConflict(email, username);
 
       if (existingUser) {
         const conflictField = existingUser.email === email ? 'email' : 'username';
@@ -984,18 +1287,92 @@ export const createServer = () => {
         return;
       }
 
-      const roleId = await fetchRoleId(role, connection);
+      const roleId = await fetchRoleId(role);
 
       if (!roleId) {
         res.status(500).json({ message: 'Required roles are missing from the database.' });
         return;
       }
 
-      const userId = randomUUID();
       const passwordHash = await bcrypt.hash(password, 12);
 
+      const otpChallenge = await issueEmailOtpChallenge({
+        email,
+        purpose: 'register',
+        context: {
+          email,
+          passwordHash,
+          username,
+          displayName,
+          city,
+          barangay,
+          preferredSport,
+          role,
+        },
+      });
+
+      await writeAuditLog({
+        actionType: 'auth_register_otp_sent',
+        targetType: 'user',
+        metadata: { email, role, deliveryMethod: otpChallenge.deliveryMethod },
+        req,
+      });
+
+      res.status(202).json({
+        requiresOtp: true,
+        challengeId: otpChallenge.challengeId,
+        maskedEmail: otpChallenge.maskedEmail,
+        expiresAt: otpChallenge.expiresAt.toISOString(),
+        devOtpPreview: otpChallenge.devOtpPreview,
+      });
+    } catch (error) {
+      console.error('Registration OTP setup failed:', error);
+      res.status(500).json({ message: 'Unable to send the registration code right now.' });
+    }
+  });
+
+  app.post('/api/auth/register/verify-otp', otpRateLimiter, async (req, res) => {
+    const validation = validateOtpRequestInput({ ...req.body, purpose: 'register' });
+
+    if (validation.error) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+
+    const { challengeId, otp } = validation.data;
+    const db = getDb();
+    const connection = await db.getConnection();
+    let transactionStarted = false;
+
+    try {
       await connection.beginTransaction();
       transactionStarted = true;
+
+      const { challenge, context } = await resolveEmailOtpChallenge({ challengeId, otp, purpose: 'register' }, connection);
+
+      if (!context?.email || !context?.username || !context?.displayName || !context?.passwordHash) {
+        throw createHttpError(400, 'Stored registration data is incomplete. Please register again.');
+      }
+
+      const existingUser = await findUserConflict(context.email, context.username, connection);
+
+      if (existingUser) {
+        const conflictField = existingUser.email === context.email ? 'email' : 'username';
+        await consumeEmailOtpChallenge(challenge.id, connection);
+        await connection.commit();
+        transactionStarted = false;
+        res.status(409).json({ message: `That ${conflictField} is already in use.` });
+        return;
+      }
+
+      const roleId = await fetchRoleId(context.role, connection);
+
+      if (!roleId) {
+        throw createHttpError(500, 'Required roles are missing from the database.');
+      }
+
+      const userId = randomUUID();
+
       await connection.execute(
         `
           INSERT INTO users (
@@ -1013,7 +1390,16 @@ export const createServer = () => {
             updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW(), NOW())
         `,
-        [userId, email, passwordHash, username, displayName, city, barangay, preferredSport]
+        [
+          userId,
+          context.email,
+          context.passwordHash,
+          context.username,
+          context.displayName,
+          context.city,
+          context.barangay,
+          context.preferredSport,
+        ]
       );
       await connection.execute(
         `INSERT INTO user_roles (user_id, role_id, assigned_at, assigned_by) VALUES (?, ?, NOW(), NULL)`,
@@ -1021,7 +1407,9 @@ export const createServer = () => {
       );
 
       const session = await createAuthSession(userId, req, connection);
+      await consumeEmailOtpChallenge(challenge.id, connection);
       await connection.commit();
+      transactionStarted = false;
 
       const userRows = await fetchUserRowsById(userId, connection);
       const authPayload = buildAuthResponse(userRows);
@@ -1032,7 +1420,7 @@ export const createServer = () => {
         actionType: 'auth_register_success',
         targetType: 'user',
         targetId: authPayload.user.id,
-        metadata: { email, role: authPayload.user.role },
+        metadata: { email: authPayload.user.email, role: authPayload.user.role },
         req,
       });
 
@@ -1044,8 +1432,13 @@ export const createServer = () => {
         } catch {
         }
       }
-      console.error('Registration failed:', error);
-      res.status(500).json({ message: 'Unable to create the account right now.' });
+
+      if (error?.statusCode) {
+        res.status(error.statusCode).json({ message: error.message });
+      } else {
+        console.error('Registration OTP verification failed:', error);
+        res.status(500).json({ message: 'Unable to verify the registration code right now.' });
+      }
     } finally {
       connection.release();
     }
@@ -1104,10 +1497,74 @@ export const createServer = () => {
         return;
       }
 
-      const db = getDb();
-      await db.execute('UPDATE users SET last_login_at = NOW() WHERE id = ?', [userRecord.id]);
-      const authPayload = buildAuthResponse(rows);
-      const session = await createAuthSession(authPayload.user.id, req);
+      const otpChallenge = await issueEmailOtpChallenge({
+        email,
+        purpose: 'login',
+        userId: userRecord.id,
+      });
+
+      await writeAuditLog({
+        actorUserId: userRecord.id,
+        actionType: 'auth_login_otp_sent',
+        targetType: 'user',
+        targetId: userRecord.id,
+        metadata: { email, deliveryMethod: otpChallenge.deliveryMethod },
+        req,
+      });
+
+      res.status(202).json({
+        requiresOtp: true,
+        challengeId: otpChallenge.challengeId,
+        maskedEmail: otpChallenge.maskedEmail,
+        expiresAt: otpChallenge.expiresAt.toISOString(),
+        devOtpPreview: otpChallenge.devOtpPreview,
+      });
+    } catch (error) {
+      console.error('Login OTP setup failed:', error);
+      res.status(500).json({ message: 'Unable to send the login code right now.' });
+    }
+  });
+
+  app.post('/api/auth/login/verify-otp', otpRateLimiter, async (req, res) => {
+    const validation = validateOtpRequestInput({ ...req.body, purpose: 'login' });
+
+    if (validation.error) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+
+    const { challengeId, otp } = validation.data;
+    const db = getDb();
+    const connection = await db.getConnection();
+    let transactionStarted = false;
+
+    try {
+      await connection.beginTransaction();
+      transactionStarted = true;
+
+      const { challenge } = await resolveEmailOtpChallenge({ challengeId, otp, purpose: 'login' }, connection);
+
+      if (!challenge.user_id) {
+        throw createHttpError(400, 'Stored login verification data is incomplete. Please sign in again.');
+      }
+
+      const userRows = await fetchUserRowsById(challenge.user_id, connection);
+
+      if (!userRows.length) {
+        throw createHttpError(404, 'This account no longer exists.');
+      }
+
+      if (userRows[0].account_status !== 'active') {
+        throw createHttpError(403, 'Account is not active yet. Please verify or contact an administrator.');
+      }
+
+      await connection.execute('UPDATE users SET last_login_at = NOW() WHERE id = ?', [challenge.user_id]);
+      const session = await createAuthSession(challenge.user_id, req, connection);
+      await consumeEmailOtpChallenge(challenge.id, connection);
+      await connection.commit();
+      transactionStarted = false;
+
+      const authPayload = buildAuthResponse(userRows);
 
       setRefreshCookie(res, session.refreshToken, session.expiresAt);
       await writeAuditLog({
@@ -1115,14 +1572,27 @@ export const createServer = () => {
         actionType: 'auth_login_success',
         targetType: 'user',
         targetId: authPayload.user.id,
-        metadata: { email, role: authPayload.user.role },
+        metadata: { email: authPayload.user.email, role: authPayload.user.role },
         req,
       });
 
       res.json(authPayload);
     } catch (error) {
-      console.error('Login failed:', error);
-      res.status(500).json({ message: 'Authentication service unavailable.' });
+      if (transactionStarted) {
+        try {
+          await connection.rollback();
+        } catch {
+        }
+      }
+
+      if (error?.statusCode) {
+        res.status(error.statusCode).json({ message: error.message });
+      } else {
+        console.error('Login OTP verification failed:', error);
+        res.status(500).json({ message: 'Unable to verify the login code right now.' });
+      }
+    } finally {
+      connection.release();
     }
   });
 

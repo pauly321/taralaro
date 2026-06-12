@@ -122,6 +122,24 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
   CONSTRAINT fk_auth_sessions_user FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS auth_email_otps (
+  id CHAR(36) NOT NULL,
+  user_id CHAR(36) NULL,
+  email VARCHAR(255) NOT NULL,
+  purpose ENUM('login', 'register') NOT NULL,
+  otp_hash VARCHAR(255) NOT NULL,
+  context_json LONGTEXT NULL,
+  attempts_remaining TINYINT UNSIGNED NOT NULL DEFAULT 5,
+  expires_at DATETIME NOT NULL,
+  consumed_at DATETIME NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  KEY idx_auth_email_otps_user_id (user_id),
+  KEY idx_auth_email_otps_email_purpose (email, purpose),
+  KEY idx_auth_email_otps_expires_at (expires_at),
+  CONSTRAINT fk_auth_email_otps_user FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
   id CHAR(36) NOT NULL,
   user_id CHAR(36) NOT NULL,

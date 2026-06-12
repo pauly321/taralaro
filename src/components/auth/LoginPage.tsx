@@ -9,11 +9,12 @@ import {
   Users,
 } from 'lucide-react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { useAuth } from '@/hooks/useAuth';
+import { OtpChallengeResponse, useAuth } from '@/hooks/useAuth';
 import { PreferredSport } from '@/lib/auth';
 
 type AuthMode = 'login' | 'register';
 type RegisterRole = 'player' | 'organizer';
+type OtpMode = OtpChallengeResponse | null;
 
 const quickAccounts = [
   {
@@ -39,8 +40,8 @@ const quickAccounts = [
 const valueProps = [
   {
     icon: ShieldCheck,
-    title: 'MySQL-Backed Login',
-    description: 'Credentials now validate against real records in the `users` table.',
+    title: 'Email OTP Login',
+    description: 'Password checks now trigger one-time codes before a session is issued.',
   },
   {
     icon: Trophy,
@@ -50,7 +51,7 @@ const valueProps = [
   {
     icon: Users,
     title: 'JWT Session Flow',
-    description: 'Successful login and registration return a signed access token for protected routes.',
+    description: 'Sessions are created only after OTP verification succeeds for login or registration.',
   },
 ];
 
@@ -81,11 +82,15 @@ const initialRegisterForm = {
 const LoginPage: React.FC = () => {
   const navigate = useNavigate();
   const location = useLocation();
-  const { isAuthenticated, login, register } = useAuth();
+  const { isAuthenticated, login, register, verifyLoginOtp, verifyRegisterOtp } = useAuth();
   const [mode, setMode] = useState<AuthMode>('login');
   const [email, setEmail] = useState('organizer@taralaro.local');
   const [password, setPassword] = useState('OrganizerPass123!');
   const [registerForm, setRegisterForm] = useState(initialRegisterForm);
+  const [loginOtpChallenge, setLoginOtpChallenge] = useState<OtpMode>(null);
+  const [registerOtpChallenge, setRegisterOtpChallenge] = useState<OtpMode>(null);
+  const [loginOtp, setLoginOtp] = useState('');
+  const [registerOtp, setRegisterOtp] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -93,8 +98,14 @@ const LoginPage: React.FC = () => {
   const from = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname || '/';
 
   const formTitle = useMemo(
-    () => (mode === 'login' ? 'Welcome back.' : 'Create your account.'),
-    [mode]
+    () => {
+      if (mode === 'login') {
+        return loginOtpChallenge ? 'Enter your login code.' : 'Welcome back.';
+      }
+
+      return registerOtpChallenge ? 'Verify your new account.' : 'Create your account.';
+    },
+    [loginOtpChallenge, mode, registerOtpChallenge]
   );
 
   if (isAuthenticated) {
@@ -105,10 +116,18 @@ const LoginPage: React.FC = () => {
     setRegisterForm((current) => ({ ...current, [key]: value }));
   };
 
+  const resetOtpFlow = () => {
+    setLoginOtpChallenge(null);
+    setRegisterOtpChallenge(null);
+    setLoginOtp('');
+    setRegisterOtp('');
+  };
+
   const switchMode = (nextMode: AuthMode) => {
     setMode(nextMode);
     setError('');
     setSuccess('');
+    resetOtpFlow();
   };
 
   const handleLoginSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -118,10 +137,37 @@ const LoginPage: React.FC = () => {
     setIsSubmitting(true);
 
     try {
-      await login({ email, password });
-      navigate(from, { replace: true });
+      const otpChallenge = await login({ email, password });
+      setLoginOtpChallenge(otpChallenge);
+      setLoginOtp('');
+      setSuccess(`We sent a login code to ${otpChallenge.maskedEmail}.`);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Unable to sign in.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleLoginOtpSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!loginOtpChallenge) {
+      setError('Start a login request first.');
+      return;
+    }
+
+    setError('');
+    setSuccess('');
+    setIsSubmitting(true);
+
+    try {
+      await verifyLoginOtp({
+        challengeId: loginOtpChallenge.challengeId,
+        otp: loginOtp,
+      });
+      navigate(from, { replace: true });
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Unable to verify the login code.');
     } finally {
       setIsSubmitting(false);
     }
@@ -140,7 +186,7 @@ const LoginPage: React.FC = () => {
     setIsSubmitting(true);
 
     try {
-      await register({
+      const otpChallenge = await register({
         email: registerForm.email,
         password: registerForm.password,
         username: registerForm.username,
@@ -150,10 +196,36 @@ const LoginPage: React.FC = () => {
         preferredSport: registerForm.preferredSport,
         role: registerForm.role,
       });
-      setSuccess('Account created and signed in successfully.');
-      navigate(from, { replace: true });
+      setRegisterOtpChallenge(otpChallenge);
+      setRegisterOtp('');
+      setSuccess(`We sent a registration code to ${otpChallenge.maskedEmail}.`);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Unable to create account.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRegisterOtpSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    if (!registerOtpChallenge) {
+      setError('Start a registration request first.');
+      return;
+    }
+
+    setError('');
+    setSuccess('');
+    setIsSubmitting(true);
+
+    try {
+      await verifyRegisterOtp({
+        challengeId: registerOtpChallenge.challengeId,
+        otp: registerOtp,
+      });
+      navigate(from, { replace: true });
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : 'Unable to verify the registration code.');
     } finally {
       setIsSubmitting(false);
     }
@@ -165,11 +237,13 @@ const LoginPage: React.FC = () => {
     setIsSubmitting(true);
 
     try {
-      await login({
+      const otpChallenge = await login({
         email: account.email,
         password: account.password,
       });
-      navigate(from, { replace: true });
+      setLoginOtpChallenge(otpChallenge);
+      setLoginOtp('');
+      setSuccess(`We sent a login code to ${otpChallenge.maskedEmail}.`);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : 'Unable to sign in.');
     } finally {
@@ -232,7 +306,7 @@ const LoginPage: React.FC = () => {
               className="max-w-lg text-base leading-7 sm:text-lg"
               style={{ color: 'rgba(245, 239, 224, 0.68)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}
             >
-              Login and registration now go through the backend, store bcrypt password hashes in MySQL, and return JWT access tokens for protected app flow.
+              Login and registration now go through the backend, store bcrypt password hashes in MySQL, and require email OTP verification before protected access is granted.
             </p>
           </div>
 
@@ -306,58 +380,162 @@ const LoginPage: React.FC = () => {
               </button>
             </div>
 
+            {error ? (
+              <div className="mb-4 rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.24)', color: '#FCA5A5', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                {error}
+              </div>
+            ) : null}
+
+            {success ? (
+              <div className="mb-4 rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(34, 197, 94, 0.08)', borderColor: 'rgba(34, 197, 94, 0.24)', color: '#86EFAC', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                {success}
+              </div>
+            ) : null}
+
             {mode === 'login' ? (
-              <form className="space-y-4" onSubmit={handleLoginSubmit}>
+              loginOtpChallenge ? (
+                <form className="space-y-4" onSubmit={handleLoginOtpSubmit}>
+                  <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(245, 239, 224, 0.04)', borderColor: 'rgba(245, 239, 224, 0.1)', color: 'rgba(245, 239, 224, 0.72)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                    Enter the code sent to <strong style={{ color: '#F5EFE0' }}>{loginOtpChallenge.maskedEmail}</strong>.
+                  </div>
+                  <div>
+                    <label className="mb-2 block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
+                      Login Code
+                    </label>
+                    <input
+                      className="w-full rounded-2xl border px-4 py-3.5 text-center text-lg tracking-[0.35em] outline-none transition"
+                      style={inputStyle}
+                      inputMode="numeric"
+                      maxLength={6}
+                      placeholder="000000"
+                      value={loginOtp}
+                      onChange={(event) => setLoginOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                    />
+                  </div>
+                  {loginOtpChallenge.devOtpPreview ? (
+                    <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(0, 180, 166, 0.08)', borderColor: 'rgba(0, 180, 166, 0.22)', color: '#8CE3DC', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                      Dev OTP preview: <strong>{loginOtpChallenge.devOtpPreview}</strong>
+                    </div>
+                  ) : null}
+                  <div className="flex gap-3">
+                    <button
+                      className="flex-1 rounded-2xl border px-4 py-3 text-sm font-bold transition-transform active:scale-[0.98]"
+                      style={{ borderColor: 'rgba(245, 239, 224, 0.12)', color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}
+                      type="button"
+                      onClick={() => {
+                        setLoginOtpChallenge(null);
+                        setLoginOtp('');
+                        setError('');
+                        setSuccess('');
+                      }}
+                    >
+                      Back
+                    </button>
+                    <button
+                      className="flex-1 flex items-center justify-center gap-2 rounded-2xl px-4 py-3.5 text-sm font-bold transition-transform active:scale-[0.98]"
+                      style={{ background: 'linear-gradient(135deg, #F4722B 0%, #FF8C42 100%)', color: '#fff', boxShadow: '0 16px 34px rgba(244, 114, 43, 0.3)', fontFamily: "'Plus Jakarta Sans', sans-serif", opacity: isSubmitting ? 0.7 : 1 }}
+                      type="submit"
+                      disabled={isSubmitting}
+                    >
+                      {isSubmitting ? 'Verifying...' : 'Verify Login'}
+                      <ArrowRight size={16} />
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <form className="space-y-4" onSubmit={handleLoginSubmit}>
+                  <div>
+                    <label className="mb-2 block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
+                      Email Address
+                    </label>
+                    <input
+                      className="w-full rounded-2xl border px-4 py-3.5 text-sm outline-none transition"
+                      style={inputStyle}
+                      type="email"
+                      placeholder="you@example.com"
+                      value={email}
+                      onChange={(event) => setEmail(event.target.value)}
+                      autoComplete="email"
+                    />
+                  </div>
+                  <div>
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <label className="block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
+                        Password
+                      </label>
+                      <span className="text-[11px] font-semibold" style={{ color: '#00B4A6', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                        OTP secured
+                      </span>
+                    </div>
+                    <input
+                      className="w-full rounded-2xl border px-4 py-3.5 text-sm outline-none transition"
+                      style={inputStyle}
+                      type="password"
+                      placeholder="Enter your password"
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      autoComplete="current-password"
+                    />
+                  </div>
+                  <button
+                    className="flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3.5 text-sm font-bold transition-transform active:scale-[0.98]"
+                    style={{ background: 'linear-gradient(135deg, #F4722B 0%, #FF8C42 100%)', color: '#fff', boxShadow: '0 16px 34px rgba(244, 114, 43, 0.3)', fontFamily: "'Plus Jakarta Sans', sans-serif", opacity: isSubmitting ? 0.7 : 1 }}
+                    type="submit"
+                    disabled={isSubmitting}
+                  >
+                    {isSubmitting ? 'Sending Code...' : 'Send Login Code'}
+                    <ArrowRight size={16} />
+                  </button>
+                </form>
+              )
+            ) : registerOtpChallenge ? (
+              <form className="space-y-4" onSubmit={handleRegisterOtpSubmit}>
+                <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(245, 239, 224, 0.04)', borderColor: 'rgba(245, 239, 224, 0.1)', color: 'rgba(245, 239, 224, 0.72)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                  Enter the code sent to <strong style={{ color: '#F5EFE0' }}>{registerOtpChallenge.maskedEmail}</strong> to finish registration.
+                </div>
                 <div>
                   <label className="mb-2 block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
-                    Email Address
+                    Registration Code
                   </label>
                   <input
-                    className="w-full rounded-2xl border px-4 py-3.5 text-sm outline-none transition"
+                    className="w-full rounded-2xl border px-4 py-3.5 text-center text-lg tracking-[0.35em] outline-none transition"
                     style={inputStyle}
-                    type="email"
-                    placeholder="you@example.com"
-                    value={email}
-                    onChange={(event) => setEmail(event.target.value)}
-                    autoComplete="email"
+                    inputMode="numeric"
+                    maxLength={6}
+                    placeholder="000000"
+                    value={registerOtp}
+                    onChange={(event) => setRegisterOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
                   />
                 </div>
-
-                <div>
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <label className="block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
-                      Password
-                    </label>
-                    <span className="text-[11px] font-semibold" style={{ color: '#00B4A6', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                      bcrypt verified
-                    </span>
-                  </div>
-                  <input
-                    className="w-full rounded-2xl border px-4 py-3.5 text-sm outline-none transition"
-                    style={inputStyle}
-                    type="password"
-                    placeholder="Enter your password"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    autoComplete="current-password"
-                  />
-                </div>
-
-                {error ? (
-                  <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.24)', color: '#FCA5A5', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                    {error}
+                {registerOtpChallenge.devOtpPreview ? (
+                  <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(0, 180, 166, 0.08)', borderColor: 'rgba(0, 180, 166, 0.22)', color: '#8CE3DC', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+                    Dev OTP preview: <strong>{registerOtpChallenge.devOtpPreview}</strong>
                   </div>
                 ) : null}
-
-                <button
-                  className="flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3.5 text-sm font-bold transition-transform active:scale-[0.98]"
-                  style={{ background: 'linear-gradient(135deg, #F4722B 0%, #FF8C42 100%)', color: '#fff', boxShadow: '0 16px 34px rgba(244, 114, 43, 0.3)', fontFamily: "'Plus Jakarta Sans', sans-serif", opacity: isSubmitting ? 0.7 : 1 }}
-                  type="submit"
-                  disabled={isSubmitting}
-                >
-                  {isSubmitting ? 'Signing In...' : 'Enter Tara Laro'}
-                  <ArrowRight size={16} />
-                </button>
+                <div className="flex gap-3">
+                  <button
+                    className="flex-1 rounded-2xl border px-4 py-3 text-sm font-bold transition-transform active:scale-[0.98]"
+                    style={{ borderColor: 'rgba(245, 239, 224, 0.12)', color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}
+                    type="button"
+                    onClick={() => {
+                      setRegisterOtpChallenge(null);
+                      setRegisterOtp('');
+                      setError('');
+                      setSuccess('');
+                    }}
+                  >
+                    Back
+                  </button>
+                  <button
+                    className="flex-1 flex items-center justify-center gap-2 rounded-2xl px-4 py-3.5 text-sm font-bold transition-transform active:scale-[0.98]"
+                    style={{ background: 'linear-gradient(135deg, #00B4A6 0%, #22C55E 100%)', color: '#fff', boxShadow: '0 16px 34px rgba(0, 180, 166, 0.28)', fontFamily: "'Plus Jakarta Sans', sans-serif", opacity: isSubmitting ? 0.7 : 1 }}
+                    type="submit"
+                    disabled={isSubmitting}
+                  >
+                    {isSubmitting ? 'Verifying...' : 'Verify Registration'}
+                    <ArrowRight size={16} />
+                  </button>
+                </div>
               </form>
             ) : (
               <form className="space-y-4" onSubmit={handleRegisterSubmit}>
@@ -388,7 +566,6 @@ const LoginPage: React.FC = () => {
                     })}
                   </div>
                 </div>
-
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="mb-2 block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
@@ -406,14 +583,12 @@ const LoginPage: React.FC = () => {
                     </select>
                   </div>
                 </div>
-
                 <div>
                   <label className="mb-2 block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
                     Display Name
                   </label>
                   <input className="w-full rounded-2xl border px-4 py-3 text-sm outline-none" style={inputStyle} value={registerForm.displayName} onChange={(event) => updateRegisterForm('displayName', event.target.value)} />
                 </div>
-
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="mb-2 block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
@@ -428,14 +603,12 @@ const LoginPage: React.FC = () => {
                     <input className="w-full rounded-2xl border px-4 py-3 text-sm outline-none" style={inputStyle} value={registerForm.barangay} onChange={(event) => updateRegisterForm('barangay', event.target.value)} />
                   </div>
                 </div>
-
                 <div>
                   <label className="mb-2 block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
                     Email Address
                   </label>
                   <input className="w-full rounded-2xl border px-4 py-3 text-sm outline-none" style={inputStyle} type="email" value={registerForm.email} onChange={(event) => updateRegisterForm('email', event.target.value)} autoComplete="email" />
                 </div>
-
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="mb-2 block text-xs font-bold uppercase tracking-[0.22em]" style={labelStyle}>
@@ -450,32 +623,19 @@ const LoginPage: React.FC = () => {
                     <input className="w-full rounded-2xl border px-4 py-3 text-sm outline-none" style={inputStyle} type="password" value={registerForm.confirmPassword} onChange={(event) => updateRegisterForm('confirmPassword', event.target.value)} autoComplete="new-password" />
                   </div>
                 </div>
-
-                {error ? (
-                  <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(239, 68, 68, 0.08)', borderColor: 'rgba(239, 68, 68, 0.24)', color: '#FCA5A5', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                    {error}
-                  </div>
-                ) : null}
-
-                {success ? (
-                  <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(34, 197, 94, 0.08)', borderColor: 'rgba(34, 197, 94, 0.24)', color: '#86EFAC', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                    {success}
-                  </div>
-                ) : null}
-
                 <button
                   className="flex w-full items-center justify-center gap-2 rounded-2xl px-4 py-3.5 text-sm font-bold transition-transform active:scale-[0.98]"
                   style={{ background: 'linear-gradient(135deg, #00B4A6 0%, #22C55E 100%)', color: '#fff', boxShadow: '0 16px 34px rgba(0, 180, 166, 0.28)', fontFamily: "'Plus Jakarta Sans', sans-serif", opacity: isSubmitting ? 0.7 : 1 }}
                   type="submit"
                   disabled={isSubmitting}
                 >
-                  {isSubmitting ? 'Creating Account...' : 'Create Account'}
+                  {isSubmitting ? 'Sending Code...' : 'Send Registration Code'}
                   <ArrowRight size={16} />
                 </button>
               </form>
             )}
 
-            {mode === 'login' ? (
+            {mode === 'login' && !loginOtpChallenge ? (
               <div className="mt-6">
                 <div className="mb-3 flex items-center justify-between gap-2">
                   <p className="text-xs font-bold uppercase tracking-[0.22em]" style={{ color: 'rgba(245, 239, 224, 0.42)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>

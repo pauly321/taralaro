@@ -11,7 +11,7 @@ const roleIds = {
 const users = [
   {
     id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
-    email: 'admin@taralaro.local',
+    email: 'admin@yopmail.com',
     password: 'AdminPass123!',
     username: 'admin',
     displayName: 'Tara Laro Admin',
@@ -24,7 +24,7 @@ const users = [
   },
   {
     id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
-    email: 'organizer@taralaro.local',
+    email: 'organizer@yopmail.com',
     password: 'OrganizerPass123!',
     username: 'organizer1',
     displayName: 'Demo Organizer',
@@ -37,7 +37,7 @@ const users = [
   },
   {
     id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
-    email: 'player@taralaro.local',
+    email: 'player@yopmail.com',
     password: 'PlayerPass123!',
     username: 'player1',
     displayName: 'Demo Player',
@@ -305,9 +305,9 @@ const main = async () => {
 
   console.log('Demo auth users seeded successfully.');
   console.log('Policy documents and sample games seeded successfully.');
-  console.log('Admin: admin@taralaro.local / AdminPass123!');
-  console.log('Organizer: organizer@taralaro.local / OrganizerPass123!');
-  console.log('Player: player@taralaro.local / PlayerPass123!');
+  console.log('Admin: admin@yopmail.com / AdminPass123!');
+  console.log('Organizer: organizer@yopmail.com / OrganizerPass123!');
+  console.log('Player: player@yopmail.com / PlayerPass123!');
 };
 
 main()

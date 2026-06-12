@@ -28,13 +28,39 @@ interface RegisterPayload {
   role: RegisterRole;
 }
 
+interface VerifyOtpPayload {
+  challengeId: string;
+  otp: string;
+}
+
+export interface OtpChallengeResponse {
+  requiresOtp: true;
+  challengeId: string;
+  maskedEmail: string;
+  expiresAt: string;
+  devOtpPreview?: string;
+}
+
+interface AuthApiResponse {
+  message?: string;
+  user?: AuthUser;
+  accessToken?: string;
+  requiresOtp?: boolean;
+  challengeId?: string;
+  maskedEmail?: string;
+  expiresAt?: string;
+  devOtpPreview?: string;
+}
+
 interface AuthContextValue {
   user: AuthUser | null;
   accessToken: string | null;
   isAuthenticated: boolean;
   isBootstrapping: boolean;
-  login: (payload: LoginPayload) => Promise<AuthSession>;
-  register: (payload: RegisterPayload) => Promise<AuthSession>;
+  login: (payload: LoginPayload) => Promise<OtpChallengeResponse>;
+  verifyLoginOtp: (payload: VerifyOtpPayload) => Promise<AuthSession>;
+  register: (payload: RegisterPayload) => Promise<OtpChallengeResponse>;
+  verifyRegisterOtp: (payload: VerifyOtpPayload) => Promise<AuthSession>;
   logout: () => Promise<void>;
 }
 
@@ -42,11 +68,14 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 const readJson = async (response: Response) => {
   try {
-    return (await response.json()) as { message?: string; user?: AuthUser; accessToken?: string };
+    return (await response.json()) as AuthApiResponse;
   } catch {
     return null;
   }
 };
+
+const isOtpChallengeResponse = (payload: AuthApiResponse | null): payload is OtpChallengeResponse =>
+  Boolean(payload?.requiresOtp && payload.challengeId && payload.maskedEmail && payload.expiresAt);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [session, setSession] = useState<AuthSession | null>(() => readStoredSession());
@@ -62,21 +91,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setSession(null);
   }, []);
 
-  const authenticate = useCallback(
-    async (path: string, body: Record<string, string>) => {
-      const response = await fetch(`${API_BASE_URL}${path}`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      });
+  const postAuth = useCallback(async (path: string, body: Record<string, string>) => {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
 
-      const payload = await readJson(response);
+    const payload = await readJson(response);
 
-      if (!response.ok || !payload?.user || !payload?.accessToken) {
-        throw new Error(payload?.message || 'Authentication failed. Check the auth server and your credentials.');
+    if (!response.ok) {
+      throw new Error(payload?.message || 'Authentication failed.');
+    }
+
+    return payload;
+  }, []);
+
+  const finalizeSession = useCallback(
+    (payload: AuthApiResponse | null) => {
+      if (!payload?.user || !payload?.accessToken) {
+        throw new Error('Authentication failed. Check the auth server and your credentials.');
       }
 
       const nextSession: AuthSession = {
@@ -98,12 +135,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('Email and password are required.');
       }
 
-      return authenticate('/auth/login', {
+      const payload = await postAuth('/auth/login', {
         email: normalizedEmail,
         password,
       });
+
+      if (!isOtpChallengeResponse(payload)) {
+        throw new Error('Unable to create a login verification request.');
+      }
+
+      return payload;
     },
-    [authenticate]
+    [postAuth]
+  );
+
+  const verifyLoginOtp = useCallback(
+    async ({ challengeId, otp }: VerifyOtpPayload) => {
+      const payload = await postAuth('/auth/login/verify-otp', {
+        challengeId: challengeId.trim(),
+        otp: otp.trim(),
+      });
+
+      return finalizeSession(payload);
+    },
+    [finalizeSession, postAuth]
   );
 
   const register = useCallback(
@@ -114,7 +169,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         throw new Error('Email and password are required.');
       }
 
-      return authenticate('/auth/register', {
+      const payload = await postAuth('/auth/register', {
         email: normalizedEmail,
         password,
         username: username.trim(),
@@ -124,8 +179,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         preferredSport,
         role,
       });
+
+      if (!isOtpChallengeResponse(payload)) {
+        throw new Error('Unable to create a registration verification request.');
+      }
+
+      return payload;
     },
-    [authenticate]
+    [postAuth]
+  );
+
+  const verifyRegisterOtp = useCallback(
+    async ({ challengeId, otp }: VerifyOtpPayload) => {
+      const payload = await postAuth('/auth/register/verify-otp', {
+        challengeId: challengeId.trim(),
+        otp: otp.trim(),
+      });
+
+      return finalizeSession(payload);
+    },
+    [finalizeSession, postAuth]
   );
 
   const logout = useCallback(async () => {
@@ -175,10 +248,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       isAuthenticated: Boolean(session?.accessToken && session?.user),
       isBootstrapping,
       login,
+      verifyLoginOtp,
       register,
+      verifyRegisterOtp,
       logout,
     }),
-    [isBootstrapping, login, logout, register, session]
+    [isBootstrapping, login, logout, register, session, verifyLoginOtp, verifyRegisterOtp]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
