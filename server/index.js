@@ -1503,11 +1503,11 @@ export const createServer = () => {
       await writeNotification(
         {
           userId: joinRequest.user_id,
-          type: decision,
-          title: decision === 'approved' ? 'Join request approved' : 'Join request declined',
+          type: decision === 'approved' ? 'accepted' : 'rejected',
+          title: decision === 'approved' ? 'Join request accepted' : 'Join request declined',
           message:
             decision === 'approved'
-              ? `${req.authUser.displayName} approved your join request for ${game.title}.`
+              ? `${req.authUser.displayName} accepted your join request for ${game.title}.`
               : `${req.authUser.displayName} declined your join request for ${game.title}.`,
           relatedGameId: gameId,
           relatedUserId: req.authUser.id,
