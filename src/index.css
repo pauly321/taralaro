@@ -180,3 +180,90 @@
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }
+
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator {
+  opacity: 0;
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+.react-datepicker {
+  background: #0d1b2a !important;
+  border: 1px solid rgba(245,239,224,0.12) !important;
+}
+
+.react-datepicker__header {
+  background: #142231 !important;
+  border-bottom: 1px solid rgba(245,239,224,0.12) !important;
+}
+
+.react-datepicker__current-month,
+.react-datepicker__day-name,
+.react-datepicker__day {
+  color: #f5efe0 !important;
+}
+
+.react-datepicker__day--selected {
+  background: #f4722b !important;
+}
+
+.react-datepicker__day:hover {
+  background: rgba(244,114,43,0.3) !important;
+}
+
+.react-time-picker {
+  width: 100%;
+}
+
+.react-time-picker__wrapper {
+  width: 100%;
+  border: 1px solid rgba(245, 239, 224, 0.1) !important;
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-radius: 24px;
+  padding: 14px 48px 14px 20px;
+}
+
+.react-time-picker__inputGroup,
+.react-time-picker__inputGroup__input,
+.react-time-picker__inputGroup__divider,
+.react-time-picker__inputGroup__amPm {
+  color: #f5efe0 !important;
+}
+
+.react-time-picker__inputGroup__input::placeholder {
+  color: rgba(245, 239, 224, 0.45) !important;
+}
+
+.react-time-picker__button svg {
+  stroke: #cdaa7d !important;
+}
+
+.marker-cluster-small,
+.marker-cluster-medium,
+.marker-cluster-large {
+  background-color: rgba(244, 114, 43, 0.28) !important;
+}
+
+.marker-cluster-small div,
+.marker-cluster-medium div,
+.marker-cluster-large div {
+  background-color: #f4722b !important;
+  color: #ffffff !important;
+  font-family: 'Plus Jakarta Sans', sans-serif !important;
+  font-weight: 800 !important;
+  box-shadow: 0 6px 18px rgba(244, 114, 43, 0.4);
+}
+
+.leaflet-container {
+  z-index: 0 !important;
+}
+
+.leaflet-pane,
+.leaflet-control,
+.leaflet-top,
+.leaflet-bottom {
+  z-index: 1 !important;
+}

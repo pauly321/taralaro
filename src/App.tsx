@@ -1,6 +1,8 @@
 import { Suspense } from "react";
-import { Routes, Route } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import Home from "./components/home";
+import LoginPage from "./components/auth/LoginPage";
+import { ProtectedRoute } from "./routes/ProtectedRoute";
 
 function App() {
   return (
@@ -17,7 +19,11 @@ function App() {
       }>
         <>
           <Routes>
-            <Route path="/" element={<Home />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<Home />} />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </>
       </Suspense>

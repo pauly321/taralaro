@@ -1,5 +1,6 @@
 import React from 'react';
 import { Calendar, Trophy } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
 import { Game } from '@/types/game';
 
 interface MyGamesScreenProps {
@@ -8,7 +9,8 @@ interface MyGamesScreenProps {
 }
 
 export const MyGamesScreen: React.FC<MyGamesScreenProps> = ({ games, onGameClick }) => {
-  const myGames = games.slice(0, 2);
+  const { user } = useAuth();
+  const myGames = games;
 
   return (
     <div className="flex-1 overflow-y-auto pb-24">
@@ -36,8 +38,29 @@ export const MyGamesScreen: React.FC<MyGamesScreenProps> = ({ games, onGameClick
             Upcoming
           </span>
         </div>
-        {myGames.map((game) => {
+        {myGames.length === 0 ? (
+          <div
+            className="rounded-xl p-8 text-center"
+            style={{ backgroundColor: 'rgba(245, 239, 224, 0.04)', border: '1px solid rgba(245, 239, 224, 0.08)' }}
+          >
+            <span className="text-4xl block mb-3">📅</span>
+            <p className="text-sm font-semibold" style={{ color: 'rgba(245, 239, 224, 0.5)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              No secured game activity yet
+            </p>
+            <p className="text-xs mt-1" style={{ color: 'rgba(245, 239, 224, 0.3)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+              Join a game or create one as an organizer to build your activity feed.
+            </p>
+          </div>
+        ) : myGames.map((game) => {
           const isBasketball = game.sport === 'basketball';
+          const isOrganizerOwner = Boolean(user?.id && game.organizerUserId && user.id === game.organizerUserId);
+          const membershipLabel = isOrganizerOwner
+            ? 'Organizer view'
+            : game.joinedStatus === 'approved'
+              ? 'Joined'
+              : game.joinedStatus === 'pending'
+                ? 'Request pending'
+                : null;
           return (
             <div
               key={game.id}
@@ -61,6 +84,18 @@ export const MyGamesScreen: React.FC<MyGamesScreenProps> = ({ games, onGameClick
                     <p className="text-xs" style={{ color: 'rgba(13,27,42,0.55)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
                       {game.date} · {game.time}
                     </p>
+                    {membershipLabel ? (
+                      <span
+                        className="inline-flex mt-2 px-2.5 py-1 rounded-full text-[11px] font-bold"
+                        style={{
+                          backgroundColor: isOrganizerOwner ? 'rgba(0, 180, 166, 0.12)' : 'rgba(244, 114, 43, 0.12)',
+                          color: isOrganizerOwner ? '#00B4A6' : '#F4722B',
+                          fontFamily: "'Plus Jakarta Sans', sans-serif",
+                        }}
+                      >
+                        {membershipLabel}
+                      </span>
+                    ) : null}
                   </div>
                   <span className="text-xl">{isBasketball ? '🏀' : '🏐'}</span>
                 </div>

@@ -1,11 +1,13 @@
 import React from 'react';
 import { X, CheckCircle, Clock, Users, AlertCircle } from 'lucide-react';
 import { Notification } from '@/types/game';
+import { markNotificationAsRead } from '@/lib/phase1Api';
+import { useAuth } from '@/hooks/useAuth';
 
 interface NotificationPanelProps {
   notifications: Notification[];
   onClose: () => void;
-  onGameClick: (gameId: string) => void;
+  onGameClick: (gameId: string, notificationId?: string) => void;
 }
 
 const notifIcons = {
@@ -13,6 +15,8 @@ const notifIcons = {
   rejected: { icon: AlertCircle, color: '#EF4444' },
   reminder: { icon: Clock, color: '#F4722B' },
   join_request: { icon: Users, color: '#00B4A6' },
+  system: { icon: AlertCircle, color: '#F5EFE0' },
+  security: { icon: AlertCircle, color: '#F4722B' },
 };
 
 export const NotificationPanel: React.FC<NotificationPanelProps> = ({
@@ -20,6 +24,7 @@ export const NotificationPanel: React.FC<NotificationPanelProps> = ({
   onClose,
   onGameClick,
 }) => {
+  const { accessToken } = useAuth();
   const unreadCount = notifications.filter((n) => !n.read).length;
 
   return (
@@ -93,7 +98,17 @@ export const NotificationPanel: React.FC<NotificationPanelProps> = ({
                         ? '1px solid rgba(245, 239, 224, 0.06)'
                         : '1px solid rgba(244, 114, 43, 0.15)',
                     }}
-                    onClick={() => onGameClick(notif.gameId)}
+                    onClick={async () => {
+                      onGameClick(notif.gameId, notif.id);
+                    
+                      if (accessToken && !notif.read) {
+                        try {
+                          await markNotificationAsRead(accessToken, notif.id);
+                        } catch (error) {
+                          console.warn('Unable to mark notification as read:', error);
+                        }
+                      }
+                    }}
                   >
                     <div
                       className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0"

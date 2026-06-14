@@ -18,7 +18,7 @@ const tabs: { id: Tab; label: string; Icon: React.FC<{ size?: number; color?: st
 export const BottomNav: React.FC<BottomNavProps> = ({ activeTab, onTabChange }) => {
   return (
     <div
-      className="fixed bottom-0 left-0 right-0 z-30 flex items-center justify-around px-2 py-3 max-w-md mx-auto"
+      className="fixed bottom-0 left-0 right-0 z-50 flex items-center justify-around px-2 py-3 max-w-md mx-auto"
       style={{
         background: 'rgba(13, 27, 42, 0.97)',
         borderTop: '1px solid rgba(245, 239, 224, 0.1)',
