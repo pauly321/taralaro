@@ -14,9 +14,12 @@ export interface Game {
   sport: Sport;
   date: string;
   time: string;
+  endTime: string;
   location: string;
   barangay: string;
   city: string;
+  latitude?: number | null;
+  longitude?: number | null;
   slotsTotal: number;
   slotsFilled: number;
   entryFee: number | null;

@@ -84,8 +84,8 @@ const LoginPage: React.FC = () => {
   const location = useLocation();
   const { isAuthenticated, login, register, verifyLoginOtp, verifyRegisterOtp } = useAuth();
   const [mode, setMode] = useState<AuthMode>('login');
-  const [email, setEmail] = useState('organizer@taralaro.local');
-  const [password, setPassword] = useState('OrganizerPass123!');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [registerForm, setRegisterForm] = useState(initialRegisterForm);
   const [loginOtpChallenge, setLoginOtpChallenge] = useState<OtpMode>(null);
   const [registerOtpChallenge, setRegisterOtpChallenge] = useState<OtpMode>(null);
@@ -279,68 +279,7 @@ const LoginPage: React.FC = () => {
         />
       </div>
 
-      <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-6xl flex-col justify-center gap-10 px-5 py-10 lg:flex-row lg:items-center lg:px-8">
-        <section className="w-full max-w-2xl">
-          <div className="mb-6 inline-flex items-center gap-3 rounded-full border px-4 py-2" style={{ borderColor: 'rgba(245, 239, 224, 0.12)', backgroundColor: 'rgba(245, 239, 224, 0.05)' }}>
-            <div className="flex h-9 w-9 items-center justify-center rounded-2xl" style={{ backgroundColor: '#F4722B' }}>
-              <Dribbble size={18} color="#fff" />
-            </div>
-            <div>
-              <p className="text-[11px] font-bold uppercase tracking-[0.28em]" style={{ color: 'rgba(245, 239, 224, 0.55)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                Tara Laro Access
-              </p>
-              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                Real database authentication enabled
-              </p>
-            </div>
-          </div>
-
-          <div className="max-w-xl space-y-5">
-            <h1
-              className="text-4xl font-black leading-none sm:text-5xl lg:text-6xl"
-              style={{ color: '#F5EFE0', fontFamily: "'Bricolage Grotesque', sans-serif", letterSpacing: '-0.04em' }}
-            >
-              Secure entry before the first whistle.
-            </h1>
-            <p
-              className="max-w-lg text-base leading-7 sm:text-lg"
-              style={{ color: 'rgba(245, 239, 224, 0.68)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}
-            >
-              Login and registration now go through the backend, store bcrypt password hashes in MySQL, and require email OTP verification before protected access is granted.
-            </p>
-          </div>
-
-          <div className="mt-8 grid gap-4 sm:grid-cols-3">
-            {valueProps.map(({ icon: Icon, title, description }) => (
-              <div
-                key={title}
-                className="rounded-[28px] border p-5"
-                style={{
-                  backgroundColor: 'rgba(8, 18, 29, 0.72)',
-                  borderColor: 'rgba(245, 239, 224, 0.1)',
-                  boxShadow: '0 20px 60px rgba(3, 9, 15, 0.28)',
-                }}
-              >
-                <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl" style={{ backgroundColor: 'rgba(245, 239, 224, 0.08)' }}>
-                  <Icon size={20} color="#F4722B" />
-                </div>
-                <h2 className="mb-2 text-lg font-black" style={{ color: '#F5EFE0', fontFamily: "'Bricolage Grotesque', sans-serif" }}>
-                  {title}
-                </h2>
-                <p className="text-sm leading-6" style={{ color: 'rgba(245, 239, 224, 0.58)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                  {description}
-                </p>
-              </div>
-            ))}
-          </div>
-
-          <div className="mt-6 flex items-center gap-3 rounded-[28px] border p-4" style={{ background: 'linear-gradient(135deg, rgba(244,114,43,0.12), rgba(0,180,166,0.08))', borderColor: 'rgba(244, 114, 43, 0.18)' }}>
-            <Sparkles size={18} color="#F4722B" />
-            <p className="text-sm leading-6" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-              The database schema remains documented in `MYSQL_SCRIPTS.md`, while the app now routes authentication to the actual API.
-            </p>
-          </div>
-        </section>
+      <div className="relative z-10 mx-auto flex min-h-screen items-center justify-center px-5 py-10">
 
         <section className="w-full max-w-md">
           <div
@@ -412,11 +351,6 @@ const LoginPage: React.FC = () => {
                       onChange={(event) => setLoginOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
                     />
                   </div>
-                  {loginOtpChallenge.devOtpPreview ? (
-                    <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(0, 180, 166, 0.08)', borderColor: 'rgba(0, 180, 166, 0.22)', color: '#8CE3DC', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                      Dev OTP preview: <strong>{loginOtpChallenge.devOtpPreview}</strong>
-                    </div>
-                  ) : null}
                   <div className="flex gap-3">
                     <button
                       className="flex-1 rounded-2xl border px-4 py-3 text-sm font-bold transition-transform active:scale-[0.98]"
@@ -507,11 +441,6 @@ const LoginPage: React.FC = () => {
                     onChange={(event) => setRegisterOtp(event.target.value.replace(/\D/g, '').slice(0, 6))}
                   />
                 </div>
-                {registerOtpChallenge.devOtpPreview ? (
-                  <div className="rounded-2xl border px-4 py-3 text-sm" style={{ backgroundColor: 'rgba(0, 180, 166, 0.08)', borderColor: 'rgba(0, 180, 166, 0.22)', color: '#8CE3DC', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                    Dev OTP preview: <strong>{registerOtpChallenge.devOtpPreview}</strong>
-                  </div>
-                ) : null}
                 <div className="flex gap-3">
                   <button
                     className="flex-1 rounded-2xl border px-4 py-3 text-sm font-bold transition-transform active:scale-[0.98]"
@@ -634,60 +563,6 @@ const LoginPage: React.FC = () => {
                 </button>
               </form>
             )}
-
-            {mode === 'login' && !loginOtpChallenge ? (
-              <div className="mt-6">
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <p className="text-xs font-bold uppercase tracking-[0.22em]" style={{ color: 'rgba(245, 239, 224, 0.42)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                    Quick Demo Access
-                  </p>
-                  <p className="text-[11px]" style={{ color: 'rgba(245, 239, 224, 0.45)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                    Uses seeded database users
-                  </p>
-                </div>
-
-                <div className="space-y-3">
-                  {quickAccounts.map((account) => (
-                    <div key={account.label} className="rounded-2xl border p-3" style={{ backgroundColor: 'rgba(245, 239, 224, 0.04)', borderColor: 'rgba(245, 239, 224, 0.1)' }}>
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-sm font-bold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                            {account.label}
-                          </p>
-                          <p className="mt-1 text-xs" style={{ color: 'rgba(245, 239, 224, 0.52)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                            {account.email}
-                          </p>
-                        </div>
-                        <div className="h-3 w-3 rounded-full" style={{ backgroundColor: account.accent }} />
-                      </div>
-                      <div className="mt-3 flex gap-2">
-                        <button
-                          className="flex-1 rounded-xl border px-3 py-2 text-xs font-semibold transition-transform active:scale-[0.98]"
-                          style={{ borderColor: 'rgba(245, 239, 224, 0.12)', color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}
-                          type="button"
-                          onClick={() => {
-                            setEmail(account.email);
-                            setPassword(account.password);
-                            setError('');
-                            setSuccess('');
-                          }}
-                        >
-                          Fill Form
-                        </button>
-                        <button
-                          className="flex-1 rounded-xl px-3 py-2 text-xs font-bold transition-transform active:scale-[0.98]"
-                          style={{ backgroundColor: account.accent, color: account.accent === '#F5EFE0' ? '#08121D' : '#fff', fontFamily: "'Plus Jakarta Sans', sans-serif" }}
-                          type="button"
-                          onClick={() => handleQuickSignIn(account)}
-                        >
-                          Sign In Now
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
           </div>
         </section>
       </div>

@@ -7,10 +7,19 @@ export const createGameSchema = z.object({
   courtName: z.string().trim().min(3, 'Court name is required.').max(150, 'Court name must be 150 characters or fewer.'),
   sport: z.enum(['basketball', 'volleyball']),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date is required.'),
-  time: z.string().regex(/^\d{2}:\d{2}$/, 'Time is required.'),
+  startTime: z.string().regex(/^\d{2}:\d{2}$/, 'Start time is required.'),
+  endTime: z.string().regex(/^\d{2}:\d{2}$/, 'End time is required.'),
   location: z.string().trim().min(5, 'Location details are required.').max(255, 'Location must be 255 characters or fewer.'),
   barangay: z.string().trim().min(2, 'Barangay is required.').max(120, 'Barangay must be 120 characters or fewer.'),
   city: z.string().trim().min(2, 'City is required.').max(120, 'City must be 120 characters or fewer.'),
+  latitude: z.string().refine((value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= -90 && parsed <= 90;
+  }, 'Please pin a valid court location.'),
+  longitude: z.string().refine((value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= -180 && parsed <= 180;
+  }, 'Please pin a valid court location.'),
   slots: z.string().refine((value) => {
     const parsed = Number(value);
     return Number.isInteger(parsed) && parsed >= 6 && parsed <= 50;
@@ -33,10 +42,13 @@ export type CreateGamePayload = {
   courtName: string;
   sport: PreferredSport;
   date: string;
-  time: string;
+  startTime: string;
+  endTime: string;
   location: string;
   barangay: string;
   city: string;
+  latitude: number;
+  longitude: number;
   slots: number;
   entryFee: number | null;
   description?: string;
@@ -51,10 +63,13 @@ export const toCreateGamePayload = (values: CreateGameFormValues): CreateGamePay
     courtName: parsed.courtName.trim(),
     sport: parsed.sport,
     date: parsed.date,
-    time: parsed.time,
+    startTime: parsed.startTime,
+    endTime: parsed.endTime,
     location: parsed.location.trim(),
     barangay: parsed.barangay.trim(),
     city: parsed.city.trim(),
+    latitude: Number(parsed.latitude),
+    longitude: Number(parsed.longitude),  
     slots: Number(parsed.slots),
     entryFee: parsed.entryFee.trim() === '' ? null : Number(parsed.entryFee),
     description: parsed.description?.trim() || '',

@@ -10,11 +10,43 @@ import { NotificationPanel } from './NotificationPanel';
 import { CreateGameModal } from './CreateGameModal';
 import { MyGamesScreen } from './MyGamesScreen';
 import { ProfileScreen } from './ProfileScreen';
-import { fetchGames, fetchMyGames, fetchNotifications } from '@/lib/phase1Api';
+import {
+  fetchGames,
+  fetchMyGames,
+  fetchNotifications,
+  fetchGameById,
+} from '@/lib/phase1Api';
 import { useAuth } from '@/hooks/useAuth';
 import { Game, Notification, Sport } from '@/types/game';
+import {MapContainer as LeafletMapContainer, TileLayer as LeafletTileLayer, Marker, Popup, useMap,} from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import MarkerClusterGroup from 'react-leaflet-cluster';
+
+
+const MapContainer = LeafletMapContainer as any;
+const TileLayer = LeafletTileLayer as any;
+const MarkerCluster = MarkerClusterGroup as any;
 
 type Tab = 'home' | 'explore' | 'mygames' | 'profile';
+
+const distanceInMiles = (
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+) => {
+  const R = 3958.8;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
 
 export const HomeFeed: React.FC = () => {
   const { accessToken, user } = useAuth();
@@ -30,12 +62,16 @@ export const HomeFeed: React.FC = () => {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
-
+  const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+  const [mapTheme, setMapTheme] = useState<
+  'satellite' | 'dark' | 'standard'
+>('satellite');
+  const [radiusMiles, setRadiusMiles] = useState(5);
   const unreadCount = notifications.filter((n) => !n.read).length;
   const isOrganizer = user?.role === 'organizer' || user?.role === 'admin';
-
   const filteredGames = useMemo(() => {
     const sportFiltered = sportFilter === 'all' ? games : games.filter((game) => game.sport === sportFilter);
+    
 
     if (activeFilters.includes('entry_fee')) {
       return sportFiltered.filter((game) => game.entryFee === null || game.entryFee <= 100);
@@ -43,6 +79,23 @@ export const HomeFeed: React.FC = () => {
 
     return sportFiltered;
   }, [activeFilters, games, sportFilter]);
+
+  const nearbyPinnedGames = useMemo(() => {
+    if (!userLocation) return [];
+  
+    return filteredGames.filter((game) => {
+      if (game.latitude == null || game.longitude == null) return false;
+  
+      return (
+        distanceInMiles(
+          userLocation[0],
+          userLocation[1],
+          game.latitude,
+          game.longitude
+        ) <= radiusMiles
+      );
+    });
+  }, [filteredGames, userLocation, radiusMiles]);
 
   const heroGame = filteredGames[0] || games[0] || null;
 
@@ -76,6 +129,20 @@ export const HomeFeed: React.FC = () => {
   };
 
   useEffect(() => {
+    navigator.geolocation?.getCurrentPosition(
+      (position) => {
+        setUserLocation([
+          position.coords.latitude,
+          position.coords.longitude,
+        ]);
+      },
+      () => {
+        setUserLocation([14.676, 121.0437]);
+      }
+    );
+  }, []);
+
+  useEffect(() => {
     loadPhase1Data();
   }, [accessToken]);
 
@@ -90,12 +157,59 @@ export const HomeFeed: React.FC = () => {
     );
   };
 
-  const handleNotificationGameClick = (gameId: string) => {
-    const game = games.find((item) => item.id === gameId) || myGames.find((item) => item.id === gameId);
-
-    if (game) {
+  const handleNotificationGameClick = async (
+    gameId: string,
+    notificationId?: string
+  ) => {
+    if (notificationId) {
+      setNotifications((current) =>
+        current.map((notif) =>
+          notif.id === notificationId
+            ? { ...notif, read: true }
+            : notif
+        )
+      );
+    }
+  
+    if (!gameId) {
+      alert('This notification is not linked to a game.');
+      return;
+    }
+  
+    const cachedGame =
+      games.find((item) => item.id === gameId) ||
+      myGames.find((item) => item.id === gameId);
+  
+    if (cachedGame) {
       setShowNotifications(false);
-      setSelectedGame(game);
+      setActiveTab('home');
+      setSelectedGame(cachedGame);
+      return;
+    }
+  
+    if (!accessToken) {
+      alert('Your session expired. Please sign in again.');
+      return;
+    }
+  
+    try {
+      const loadedGame = await fetchGameById(accessToken, gameId);
+  
+      setGames((current) =>
+        current.some((game) => game.id === loadedGame.id)
+          ? current
+          : [loadedGame, ...current]
+      );
+  
+      setShowNotifications(false);
+      setActiveTab('home');
+      setSelectedGame(loadedGame);
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : 'This game is no longer available or has been removed.'
+      );
     }
   };
 
@@ -177,22 +291,229 @@ export const HomeFeed: React.FC = () => {
           </>
         )}
 
-        {activeTab === 'explore' && (
-          <div className="flex flex-col items-center justify-center h-full gap-4 px-6">
-            <span className="text-6xl">🗺️</span>
-            <h2 className="text-2xl font-black text-center" style={{ color: '#F5EFE0', fontFamily: "'Bricolage Grotesque', sans-serif" }}>
-              Map View
-            </h2>
-            <p className="text-sm text-center" style={{ color: 'rgba(245, 239, 224, 0.45)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-              Google Maps integration for court discovery remains a later phase, but protected data plumbing is now in place.
-            </p>
-            <div className="w-full max-w-xs p-4 rounded-2xl text-center" style={{ backgroundColor: 'rgba(0, 180, 166, 0.1)', border: '1px solid rgba(0, 180, 166, 0.2)' }}>
-              <p className="text-xs font-semibold" style={{ color: '#00B4A6', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-                Secure feeds and organizer actions are active in Phase 1.
-              </p>
-            </div>
-          </div>
-        )}
+            {activeTab === 'explore' && (
+              <div className="h-full px-4 pt-4 pb-6">
+                <div className="mb-4">
+                  <h2
+                    className="text-2xl font-black"
+                    style={{
+                      color: '#F5EFE0',
+                      fontFamily: "'Bricolage Grotesque', sans-serif",
+                    }}
+                  >
+                    Nearby Games
+                  </h2>
+
+                  <div
+                      className="flex mb-4 p-1 rounded-2xl"
+                      style={{
+                        backgroundColor: 'rgba(13,27,42,0.75)',
+                        backdropFilter: 'blur(16px)',
+                        border: '1px solid rgba(245,239,224,0.08)',
+                      }}
+                    >
+                    {[
+                      { id: 'satellite', label: 'Satellite' },
+                      { id: 'dark', label: 'Night' },
+                      { id: 'standard', label: 'Default' },
+                    ].map((theme) => (
+                      <button
+                        key={theme.id}
+                        onClick={() => setMapTheme(theme.id as any)}
+                        className="flex-1 py-2 rounded-xl text-xs font-semibold transition-all"
+                        style={{
+                          backgroundColor:
+                            mapTheme === theme.id
+                              ? '#F4722B'
+                              : 'transparent',
+
+                          boxShadow:
+                            mapTheme === theme.id
+                              ? '0 6px 18px rgba(244,114,43,0.35)'
+                              : 'none',
+                          color:
+                            mapTheme === theme.id
+                              ? '#fff'
+                              : 'rgba(245,239,224,0.65)',
+                        }}
+                      >
+                        {theme.label}
+                      </button>
+                    ))}
+                  </div>
+                  <div
+                        className="mb-4 rounded-2xl p-4"
+                        style={{
+                          backgroundColor: 'rgba(245,239,224,0.04)',
+                          border: '1px solid rgba(245,239,224,0.08)',
+                        }}
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <span
+                            className="text-sm"
+                            style={{
+                              color: 'rgba(245,239,224,0.7)',
+                            }}
+                          >
+                            Search Radius
+                          </span>
+
+                          <span
+                            className="text-sm font-bold"
+                            style={{
+                              color: '#00D4C7',
+                            }}
+                          >
+                            {radiusMiles} mi
+                          </span>
+                        </div>
+
+                        <input
+                          type="range"
+                          min="1"
+                          max="20"
+                          step="1"
+                          value={radiusMiles}
+                          onChange={(e) => setRadiusMiles(Number(e.target.value))}
+                          style={{
+                            width: '100%',
+                            accentColor: '#F4722B',
+                          }}
+                        />
+                      </div>
+                  <p
+                    className="text-sm mt-1"
+                    style={{
+                      color: 'rgba(245, 239, 224, 0.45)',
+                      fontFamily: "'Plus Jakarta Sans', sans-serif",
+                    }}
+                  >
+                    Showing pinned games within {radiusMiles} miles of your current location.
+                  </p>
+                </div>
+
+                <div
+                  className="relative z-0 overflow-hidden rounded-3xl border"
+                  style={{
+                    height: '68vh',
+                    borderColor: 'rgba(245, 239, 224, 0.1)',
+                  }}
+    >
+        {userLocation ? (
+              <MapContainer
+              center={userLocation}
+              zoom={13}
+              style={{ height: '100%', width: '100%' }}
+            >
+              {mapTheme === 'satellite' && (
+                <>
+                  <TileLayer
+                    attribution="Tiles © Esri"
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                  />
+
+                  <TileLayer
+                    attribution="Esri"
+                    url="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+                  />
+                </>
+              )}
+
+              {mapTheme === 'dark' && (
+                <TileLayer
+                  attribution="© CARTO"
+                  url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+                />
+              )}
+
+              {mapTheme === 'standard' && (
+                <TileLayer
+                  attribution="© OpenStreetMap contributors"
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+                />
+              )}
+            
+              {/* User location stays separate */}
+              <Marker position={userLocation}>
+                <Popup>You are here</Popup>
+              </Marker>
+            
+              {/* Only game markers are clustered */}
+              <MarkerCluster
+                chunkedLoading
+                showCoverageOnHover={false}
+                spiderfyOnMaxZoom
+                maxClusterRadius={50}
+                disableClusteringAtZoom={17}
+              >
+                {nearbyPinnedGames.map((game) => (
+                  <Marker
+                    key={game.id}
+                    position={[game.latitude!, game.longitude!] as [number, number]}
+                  >
+                    <Popup>
+                      <div style={{ minWidth: 190 }}>
+                        <strong>{game.title}</strong>
+
+                        <p style={{ margin: '6px 0', color: '#F4722B', fontWeight: 700 }}>
+                          {game.sport === 'basketball' ? '🏀 Basketball' : '🏐 Volleyball'}
+                        </p>
+
+                        <p style={{ margin: '6px 0' }}>
+                          📍 {game.courtName}
+                        </p>
+
+                        <p style={{ margin: '6px 0' }}>
+                          📅 {game.date}
+                        </p>
+
+                        <p style={{ margin: '6px 0' }}>
+                          🕒 {game.time} – {game.endTime}
+                        </p>
+
+                        <p style={{ margin: '6px 0' }}>
+                          👤 {game.organizerName}
+                        </p>
+
+                        <p style={{ margin: '6px 0', fontWeight: 700 }}>
+                          {game.entryFee === null ? 'FREE' : `₱${game.entryFee}`}
+                        </p>
+            
+                        <button
+                          type="button"
+                          onClick={() => setSelectedGame(game)}
+                          style={{
+                            marginTop: 8,
+                            backgroundColor: '#F4722B',
+                            color: '#ffffff',
+                            border: 'none',
+                            borderRadius: 10,
+                            padding: '8px 12px',
+                            width: '100%',
+                            fontWeight: 700,
+                          }}
+                        >
+                          View Details
+                        </button>
+                      </div>
+                    </Popup>
+                  </Marker>
+                ))}
+              </MarkerCluster>
+            </MapContainer>
+            ) : (
+              
+        <div className="flex h-full items-center justify-center text-sm text-[#F5EFE0]/50">
+          Loading your location...
+        </div>
+      )}
+    </div>
+
+    <p className="mt-3 text-center text-xs text-[#F5EFE0]/45">
+      {nearbyPinnedGames.length} pinned game(s) nearby
+    </p>
+  </div>
+)}
 
         {activeTab === 'mygames' && <MyGamesScreen games={myGames} onGameClick={setSelectedGame} />}
 

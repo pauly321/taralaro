@@ -1,4 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import {MapContainer as LeafletMapContainer,TileLayer as LeafletTileLayer, Marker, useMapEvents,} from 'react-leaflet';
+import 'leaflet/dist/leaflet.css';
+import { deleteGame as deleteGameRequest } from '../../lib/phase1Api';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -15,6 +18,10 @@ import { fetchGameJoinRequests, joinGame, reviewGameJoinRequest } from '@/lib/ph
 import { useAuth } from '@/hooks/useAuth';
 import { Game, GameJoinRequest, JoinRequestReviewDecision } from '@/types/game';
 import { ReportIssueModal } from './ReportIssueModal';
+import { CreateGameModal } from './CreateGameModal';
+
+const MapContainer = LeafletMapContainer as any;
+const TileLayer = LeafletTileLayer as any;
 
 interface GameDetailsProps {
   game: Game;
@@ -35,6 +42,10 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
   const [joinError, setJoinError] = useState('');
   const [reviewError, setReviewError] = useState('');
   const [isJoining, setIsJoining] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showDirectionsModal, setShowDirectionsModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
 
   useEffect(() => {
     setCurrentGame(game);
@@ -50,7 +61,20 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
   const isOrganizerOwner = user?.id && currentGame.organizerUserId ? user.id === currentGame.organizerUserId : false;
   const isGameUnavailable = ['FULL', 'CANCELLED', 'COMPLETED'].includes(currentGame.status);
   const isJoined = joinedStatus === 'pending' || joinedStatus === 'approved';
-
+  const displayDate = (() => {
+    const date = new Date(currentGame.date);
+  
+    if (Number.isNaN(date.getTime())) {
+      return currentGame.date;
+    }
+  
+    return date.toLocaleDateString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  })();
   const joinLabel = useMemo(() => {
     if (joinedStatus === 'approved') {
       return 'You are in this game';
@@ -62,6 +86,10 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
 
     return 'Join Game';
   }, [joinedStatus]);
+
+  const canEdit =
+  user?.role === 'organizer' &&
+  user?.id === game.organizerUserId;
 
   useEffect(() => {
     if (!isOrganizerOwner || !accessToken) {
@@ -121,6 +149,27 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
     }
   };
 
+  const handleDeleteGame = async () => {
+    if (!accessToken) return;
+  
+    try {
+      setIsDeleting(true);
+  
+      await deleteGameRequest(accessToken, currentGame.id);
+
+      onGameUpdated?.();
+      onBack();
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : 'Unable to delete the game.'
+      );
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   const handleReviewRequest = async (requestId: string, decision: JoinRequestReviewDecision) => {
     if (!accessToken) {
       setReviewError('Your session expired. Please sign in again.');
@@ -176,11 +225,6 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
 
       <div className="flex-1 overflow-y-auto pb-36">
         <div className="p-5 space-y-5">
-          <div className="rounded-2xl border p-4" style={{ backgroundColor: 'rgba(0, 180, 166, 0.08)', borderColor: 'rgba(0, 180, 166, 0.22)' }}>
-            <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-              Protected detail view: join requests, reports, and organizer actions are now tracked through the backend.
-            </p>
-          </div>
 
           <p className="text-sm" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
             📍 {currentGame.courtName}
@@ -192,8 +236,8 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
                 <Clock size={14} color={accentColor} />
                 <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: accentColor, fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Date & Time</span>
               </div>
-              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.date}</p>
-              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.time}</p>
+              <p className="text-sm font-semibold" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{displayDate}</p>
+              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.time} - {currentGame.endTime}</p>
             </div>
 
             <div className="p-3 rounded-xl" style={{ backgroundColor: 'rgba(245, 239, 224, 0.06)', border: '1px solid rgba(245, 239, 224, 0.08)' }}>
@@ -205,6 +249,46 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
               <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.city}</p>
             </div>
           </div>
+            {currentGame.latitude && currentGame.longitude && (
+              <div
+              className="relative z-0 rounded-xl overflow-hidden"
+            >
+                <MapContainer
+                  center={[currentGame.latitude, currentGame.longitude] as [number, number]}
+                  zoom={16}
+                  style={{ height: 250, width: '100%' }}
+                >
+                  <TileLayer
+                    attribution="Tiles © Esri"
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                  />
+
+                  <TileLayer
+                    attribution="Esri"
+                    url="https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+                  />
+                  <Marker
+                    position={[currentGame.latitude, currentGame.longitude] as [number, number]}
+                  />
+                </MapContainer>
+
+                <button
+                  type="button"
+                  onClick={() => setShowDirectionsModal(true)}
+
+                  className="mt-3 w-full rounded-2xl px-4 py-3 text-sm font-bold active:scale-95 transition-transform"
+                  style={{
+                    backgroundColor: 'rgba(244, 114, 43, 0.15)',
+                    border: '1px solid rgba(244, 114, 43, 0.3)',
+                    color: '#F4722B',
+                    fontFamily: "'Plus Jakarta Sans', sans-serif",
+                  }}
+                >
+                  Open in Maps
+                </button>
+              </div>
+            )}
+          
 
           <div className="p-4 rounded-xl" style={{ backgroundColor: 'rgba(245, 239, 224, 0.06)', border: '1px solid rgba(245, 239, 224, 0.08)' }}>
             <div className="flex items-center justify-between mb-3">
@@ -346,6 +430,50 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
             </div>
           ) : null}
 
+{isOrganizerOwner ? (
+            <div className="space-y-3">
+              <button
+                className="w-full py-4 rounded-2xl font-bold text-base"
+                style={{
+                  backgroundColor: 'rgba(0, 180, 166, 0.18)',
+                  border: '1px solid rgba(0, 180, 166, 0.35)',
+                  color: '#00B4A6',
+                }}
+              >
+                You organized this game
+              </button>
+
+              {canEdit ? (
+                <button
+                  type="button"
+                  onClick={() => setShowEditModal(true)}
+                  className="w-full py-4 rounded-2xl font-bold text-base"
+                  style={{
+                    backgroundColor: 'rgba(0, 180, 166, 0.18)',
+                    border: '1px solid rgba(0, 180, 166, 0.35)',
+                    color: '#00B4A6',
+                    fontFamily: "'Plus Jakarta Sans', sans-serif",
+                  }}
+                >
+                  Edit Game
+                </button>
+              ) : null}
+
+              <button
+                onClick={() => setShowDeleteConfirm(true)}
+                disabled={isDeleting}
+                className="w-full py-4 rounded-2xl font-bold text-base"
+                style={{
+                  backgroundColor: 'rgba(239, 68, 68, 0.18)',
+                  border: '1px solid rgba(239, 68, 68, 0.35)',
+                  color: '#EF4444',
+                }}
+              >
+                {isDeleting ? 'Deleting...' : 'Delete Game'}
+              </button>
+            </div>
+          ) : null}
+
           <button className="w-full flex items-center justify-center gap-2 rounded-2xl border px-4 py-3 text-sm font-bold" style={{ backgroundColor: 'rgba(239, 68, 68, 0.06)', borderColor: 'rgba(239, 68, 68, 0.18)', color: '#FCA5A5', fontFamily: "'Plus Jakarta Sans', sans-serif" }} onClick={() => setShowReportModal(true)}>
             <ShieldAlert size={16} />
             Report this game
@@ -373,11 +501,7 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
               {joinLabel}
             </span>
           </div>
-        ) : isOrganizerOwner ? (
-          <button className="w-full py-4 rounded-2xl font-bold text-base" style={{ backgroundColor: 'rgba(0, 180, 166, 0.18)', border: '1px solid rgba(0, 180, 166, 0.3)', color: '#00B4A6', fontFamily: "'Plus Jakarta Sans', sans-serif" }} disabled>
-            You organized this game
-          </button>
-        ) : isGameUnavailable ? (
+                ) : isOrganizerOwner ? null : isGameUnavailable ? (
           <button className="w-full py-4 rounded-2xl flex items-center justify-center gap-2" style={{ backgroundColor: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)' }} disabled>
             <XCircle size={20} color="#EF4444" />
             <span className="font-bold text-base" style={{ color: '#EF4444', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
@@ -405,7 +529,7 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
 
             <div className="p-4 rounded-xl mb-5" style={{ backgroundColor: 'rgba(244, 114, 43, 0.08)', border: '1px solid rgba(244, 114, 43, 0.2)' }}>
               <p className="font-bold text-sm mb-1" style={{ color: '#F5EFE0', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.title}</p>
-              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{currentGame.date} · {currentGame.time} · {currentGame.city}</p>
+              <p className="text-xs" style={{ color: 'rgba(245, 239, 224, 0.6)', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>{displayDate} · {currentGame.time} - {currentGame.endTime} · {currentGame.city}</p>
               {currentGame.entryFee !== null ? <p className="text-xs mt-1 font-semibold" style={{ color: '#F4722B', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>Entry fee: PHP {currentGame.entryFee}</p> : null}
             </div>
 
@@ -422,6 +546,169 @@ export const GameDetails: React.FC<GameDetailsProps> = ({ game, onBack, onGameUp
       ) : null}
 
       {showReportModal ? <ReportIssueModal game={currentGame} onClose={() => setShowReportModal(false)} /> : null}
+      {showDirectionsModal ? (
+        <>
+          <div
+            className="fixed inset-0 z-[9998] bg-black/60"
+            onClick={() => setShowDirectionsModal(false)}
+          />
+
+          <div
+            className="fixed left-1/2 top-1/2 z-[9999] w-[90%] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-3xl border p-5"
+            style={{
+              backgroundColor: '#0D1B2A',
+              borderColor: 'rgba(245, 239, 224, 0.12)',
+              boxShadow: '0 24px 80px rgba(0,0,0,0.45)',
+            }}
+          >
+            <h3
+              className="text-xl font-black"
+              style={{
+                color: '#F5EFE0',
+                fontFamily: "'Bricolage Grotesque', sans-serif",
+              }}
+            >
+              Open Directions
+            </h3>
+
+            <p
+              className="mt-2 text-sm"
+              style={{
+                color: 'rgba(245,239,224,0.6)',
+                fontFamily: "'Plus Jakarta Sans', sans-serif",
+              }}
+            >
+              Choose your navigation app.
+            </p>
+
+            <div className="mt-5 space-y-3">
+              <button
+                className="w-full rounded-2xl px-4 py-3 text-sm font-bold"
+                style={{
+                  backgroundColor: '#4285F4',
+                  color: '#fff',
+                }}
+                onClick={() => {
+                  window.open(
+                    `https://www.google.com/maps?q=${currentGame.latitude},${currentGame.longitude}`,
+                    '_blank'
+                  );
+                  setShowDirectionsModal(false);
+                }}
+              >
+                Google Maps
+              </button>
+
+              <button
+                className="w-full rounded-2xl px-4 py-3 text-sm font-bold"
+                style={{
+                  backgroundColor: '#F5EFE0',
+                  color: '#08121D',
+                }}
+                onClick={() => {
+                  const appleMapsUrl = `https://maps.apple.com/?q=${encodeURIComponent(currentGame.courtName || 'Game Location')}&ll=${currentGame.latitude},${currentGame.longitude}&z=17`;
+                
+                  window.open(appleMapsUrl, '_blank');
+                  setShowDirectionsModal(false);
+                }}
+              >
+                Apple Maps
+              </button>
+
+              <button
+                className="w-full rounded-2xl border px-4 py-3 text-sm font-bold"
+                style={{
+                  borderColor: 'rgba(245,239,224,0.12)',
+                  color: '#F5EFE0',
+                }}
+                onClick={() => setShowDirectionsModal(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </>
+      ) : null}
+
+          {showEditModal ? (
+        <CreateGameModal
+          mode="edit"
+          game={currentGame}
+          onClose={() => setShowEditModal(false)}
+          onUpdated={(updatedGame) => {
+            setCurrentGame(updatedGame);
+            setShowEditModal(false);
+            onGameUpdated?.();
+          }}
+        />
+      ) : null}
+
+      {showDeleteConfirm ? (
+  <>
+    <div
+      className="fixed inset-0 z-[9998] bg-black/60"
+      onClick={() => setShowDeleteConfirm(false)}
+    />
+
+    <div
+      className="fixed left-1/2 top-1/2 z-[9999] w-[90%] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-3xl border p-5"
+      style={{
+        backgroundColor: '#0D1B2A',
+        borderColor: 'rgba(245, 239, 224, 0.12)',
+        boxShadow: '0 24px 80px rgba(0,0,0,0.45)',
+      }}
+    >
+      <h3
+        className="text-xl font-black"
+        style={{
+          color: '#F5EFE0',
+          fontFamily: "'Bricolage Grotesque', sans-serif",
+        }}
+      >
+        Delete this game?
+      </h3>
+
+      <p
+        className="mt-2 text-sm leading-6"
+        style={{
+          color: 'rgba(245, 239, 224, 0.65)',
+          fontFamily: "'Plus Jakarta Sans', sans-serif",
+        }}
+      >
+        This game will be hidden from the feed and players will no longer be able to join it.
+      </p>
+
+      <div className="mt-5 flex gap-3">
+        <button
+          className="flex-1 rounded-2xl border px-4 py-3 text-sm font-bold"
+          style={{
+            borderColor: 'rgba(245, 239, 224, 0.12)',
+            color: '#F5EFE0',
+            fontFamily: "'Plus Jakarta Sans', sans-serif",
+          }}
+          onClick={() => setShowDeleteConfirm(false)}
+          disabled={isDeleting}
+        >
+          Cancel
+        </button>
+
+        <button
+          className="flex-1 rounded-2xl px-4 py-3 text-sm font-bold"
+          style={{
+            backgroundColor: '#EF4444',
+            color: '#fff',
+            fontFamily: "'Plus Jakarta Sans', sans-serif",
+            opacity: isDeleting ? 0.7 : 1,
+          }}
+          onClick={handleDeleteGame}
+          disabled={isDeleting}
+        >
+          {isDeleting ? 'Deleting...' : 'Delete'}
+        </button>
+      </div>
+    </div>
+  </>
+) : null}
     </div>
   );
 };

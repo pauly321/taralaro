@@ -256,6 +256,9 @@ const serializeGame = (row) => {
     sport: row.sport,
     date: formatDateLabel(row.game_date),
     time: formatTimeLabel(row.start_time),
+    endTime: formatTimeLabel(row.end_time),
+    latitude: row.latitude === null ? null : Number(row.latitude),
+    longitude: row.longitude === null ? null : Number(row.longitude),
     location: row.location_text,
     barangay: row.barangay,
     city: row.city,
@@ -436,7 +439,10 @@ const validateGameInput = (body) => {
   const courtName = normalizeString(body?.courtName);
   const sport = validSports.includes(body?.sport) ? body.sport : null;
   const gameDate = normalizeString(body?.date);
-  const startTime = normalizeString(body?.time);
+  const startTime = normalizeString(body?.startTime || body?.time);
+  const endTime = normalizeString(body?.endTime);
+  const latitude = Number(body?.latitude);
+  const longitude = Number(body?.longitude);
   const locationText = normalizeString(body?.location);
   const barangay = normalizeString(body?.barangay);
   const city = normalizeString(body?.city);
@@ -466,6 +472,18 @@ const validateGameInput = (body) => {
     return { error: 'A valid start time is required.' };
   }
 
+  if (!/^\d{2}:\d{2}$/.test(endTime)) {
+    return { error: 'A valid end time is required.' };
+  }
+  
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
+    return { error: 'A valid pinned location is required.' };
+  }
+  
+  if (!Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    return { error: 'A valid pinned location is required.' };
+  }
+
   if (locationText.length < 5 || locationText.length > 255) {
     return { error: 'Location details must be between 5 and 255 characters.' };
   }
@@ -493,6 +511,9 @@ const validateGameInput = (body) => {
       sport,
       gameDate,
       startTime: `${startTime}:00`,
+      endTime: `${endTime}:00`,
+      latitude,
+      longitude,
       locationText,
       barangay,
       city,
@@ -904,6 +925,9 @@ const fetchFeedGames = async (userId, connection = getDb()) => {
         g.description,
         g.game_date,
         g.start_time,
+        end_time,
+        latitude,
+        longitude,
         g.location_text,
         g.barangay,
         g.city,
@@ -918,7 +942,9 @@ const fetchFeedGames = async (userId, connection = getDb()) => {
       INNER JOIN users organizer ON organizer.id = g.organizer_user_id
       LEFT JOIN game_participants gp ON gp.game_id = g.id
       LEFT JOIN game_participants self_gp ON self_gp.game_id = g.id AND self_gp.user_id = ?
-      WHERE g.visibility = 'public' AND g.status IN ('open', 'full')
+      WHERE g.visibility = 'public'
+      AND g.status IN ('open', 'full')
+      AND g.deleted_at IS NULL
       GROUP BY
         g.id,
         g.organizer_user_id,
@@ -928,6 +954,7 @@ const fetchFeedGames = async (userId, connection = getDb()) => {
         g.description,
         g.game_date,
         g.start_time,
+        g.end_time,
         g.location_text,
         g.barangay,
         g.city,
@@ -956,6 +983,9 @@ const fetchMyGames = async (userId, connection = getDb()) => {
         g.description,
         g.game_date,
         g.start_time,
+        end_time,
+        latitude,
+        longitude,
         g.location_text,
         g.barangay,
         g.city,
@@ -970,7 +1000,8 @@ const fetchMyGames = async (userId, connection = getDb()) => {
       INNER JOIN users organizer ON organizer.id = g.organizer_user_id
       LEFT JOIN game_participants gp ON gp.game_id = g.id
       LEFT JOIN game_participants membership ON membership.game_id = g.id AND membership.user_id = ?
-      WHERE g.organizer_user_id = ? OR membership.user_id = ?
+      WHERE (g.organizer_user_id = ? OR membership.user_id = ?)
+      AND g.deleted_at IS NULL
       GROUP BY
         g.id,
         g.organizer_user_id,
@@ -980,6 +1011,9 @@ const fetchMyGames = async (userId, connection = getDb()) => {
         g.description,
         g.game_date,
         g.start_time,
+        end_time,
+        latitude,
+        longitude,
         g.location_text,
         g.barangay,
         g.city,
@@ -1008,6 +1042,9 @@ const fetchGameById = async (gameId, userId, connection = getDb()) => {
         g.description,
         g.game_date,
         g.start_time,
+        end_time,
+        latitude,
+        longitude,
         g.location_text,
         g.barangay,
         g.city,
@@ -1023,6 +1060,7 @@ const fetchGameById = async (gameId, userId, connection = getDb()) => {
       LEFT JOIN game_participants gp ON gp.game_id = g.id
       LEFT JOIN game_participants self_gp ON self_gp.game_id = g.id AND self_gp.user_id = ?
       WHERE g.id = ?
+      AND g.deleted_at IS NULL
       GROUP BY
         g.id,
         g.organizer_user_id,
@@ -1032,6 +1070,9 @@ const fetchGameById = async (gameId, userId, connection = getDb()) => {
         g.description,
         g.game_date,
         g.start_time,
+        end_time,
+        latitude,
+        longitude,
         g.location_text,
         g.barangay,
         g.city,
@@ -1616,6 +1657,24 @@ export const createServer = () => {
     }
   });
 
+  app.get('/api/games/:gameId', requireAuth, async (req, res) => {
+    const { gameId } = req.params;
+  
+    try {
+      const game = await fetchGameById(gameId, req.authUser.id);
+  
+      if (!game) {
+        res.status(404).json({ message: 'Game not found.' });
+        return;
+      }
+  
+      res.json({ game });
+    } catch (error) {
+      console.error('Load game failed:', error);
+      res.status(500).json({ message: 'Unable to load this game.' });
+    }
+  });
+
   app.post('/api/games', requireAuth, async (req, res) => {
     if (!['organizer', 'admin'].includes(req.authUser.role)) {
       res.status(403).json({ message: 'Only organizers and admins can create games.' });
@@ -1650,6 +1709,9 @@ export const createServer = () => {
             description,
             game_date,
             start_time,
+            end_time,
+            latitude,
+            longitude,
             location_text,
             barangay,
             city,
@@ -1660,7 +1722,7 @@ export const createServer = () => {
             status,
             created_at,
             updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'public', 'open', NOW(), NOW())
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'public', 'open', NOW(), NOW())
         `,
         [
           gameId,
@@ -1671,6 +1733,9 @@ export const createServer = () => {
           data.description || null,
           data.gameDate,
           data.startTime,
+          data.endTime,
+          data.latitude,
+          data.longitude,
           data.locationText,
           data.barangay,
           data.city,
@@ -1717,6 +1782,156 @@ export const createServer = () => {
       res.status(500).json({ message: 'Unable to create the game right now.' });
     } finally {
       connection.release();
+    }
+  });
+
+  app.patch('/api/games/:gameId', requireAuth, async (req, res) => {
+    const { gameId } = req.params;
+  
+    if (!['organizer', 'admin'].includes(req.authUser.role)) {
+      res.status(403).json({ message: 'Only organizers and admins can edit games.' });
+      return;
+    }
+  
+    const validation = validateGameInput(req.body);
+  
+    if (validation.error) {
+      res.status(400).json({ message: validation.error });
+      return;
+    }
+  
+    const data = validation.data;
+    const db = getDb();
+  
+    try {
+      const [gameRows] = await db.execute(
+        `
+          SELECT id, organizer_user_id
+          FROM games
+          WHERE id = ?
+          LIMIT 1
+        `,
+        [gameId]
+      );
+  
+      const existingGame = gameRows[0];
+  
+      if (!existingGame) {
+        res.status(404).json({ message: 'Game not found.' });
+        return;
+      }
+  
+      if (existingGame.organizer_user_id !== req.authUser.id && req.authUser.role !== 'admin') {
+        res.status(403).json({ message: 'Only the organizer of this game can edit it.' });
+        return;
+      }
+  
+      await db.execute(
+        `
+        UPDATE games
+        SET
+          title = ?,
+          court_name = ?,
+          description = ?,
+          game_date = ?,
+          start_time = ?,
+          end_time = ?,
+          latitude = ?,
+          longitude = ?,
+          location_text = ?,
+          barangay = ?,
+          city = ?,
+          max_slots = ?,
+          entry_fee = ?,
+          image_url = ?,
+          updated_at = NOW()
+        WHERE id = ?
+        `,
+        [
+          data.title,
+          data.courtName,
+          data.description || null,
+          data.gameDate,
+          data.startTime,
+          data.endTime,
+          data.latitude,
+          data.longitude,
+          data.locationText,
+          data.barangay,
+          data.city,
+          data.slots,
+          data.entryFee,
+          data.imageUrl,
+          gameId,
+        ]
+      );
+  
+      const updatedGame = await fetchGameById(gameId, req.authUser.id);
+  
+      res.json({ game: updatedGame });
+    } catch (error) {
+      console.error('Update game failed:', error);
+      res.status(500).json({ message: 'Unable to update the game right now.' });
+    }
+  });
+
+  app.delete('/api/games/:gameId', requireAuth, async (req, res) => {
+    const { gameId } = req.params;
+  
+    if (!['organizer', 'admin'].includes(req.authUser.role)) {
+      res.status(403).json({ message: 'Only organizers and admins can delete games.' });
+      return;
+    }
+  
+    const db = getDb();
+  
+    try {
+      const [gameRows] = await db.execute(
+        `
+          SELECT id, organizer_user_id
+          FROM games
+          WHERE id = ?
+          LIMIT 1
+        `,
+        [gameId]
+      );
+  
+      const game = gameRows[0];
+  
+      if (!game) {
+        res.status(404).json({ message: 'Game not found.' });
+        return;
+      }
+  
+      if (game.organizer_user_id !== req.authUser.id && req.authUser.role !== 'admin') {
+        res.status(403).json({ message: 'Only the organizer of this game can delete it.' });
+        return;
+      }
+  
+      await db.execute(
+        `
+          UPDATE games
+          SET
+            deleted_at = NOW(),
+            updated_at = NOW()
+          WHERE id = ?
+        `,
+        [gameId]
+      );
+  
+      await writeAuditLog({
+        actorUserId: req.authUser.id,
+        actionType: 'game_deleted',
+        targetType: 'game',
+        targetId: gameId,
+        metadata: {},
+        req,
+      });
+  
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Delete game failed:', error);
+      res.status(500).json({ message: 'Unable to delete the game.' });
     }
   });
 
@@ -2032,6 +2247,29 @@ export const createServer = () => {
     } catch (error) {
       console.error('Load notifications failed:', error);
       res.status(500).json({ message: 'Unable to load notifications.' });
+    }
+  });
+
+  app.patch('/api/notifications/:notificationId/read', requireAuth, async (req, res) => {
+    const { notificationId } = req.params;
+  
+    try {
+      const db = getDb();
+  
+      await db.execute(
+        `
+          UPDATE notifications
+          SET is_read = 1
+          WHERE id = ?
+            AND user_id = ?
+        `,
+        [notificationId, req.authUser.id]
+      );
+  
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Mark notification read failed:', error);
+      res.status(500).json({ message: 'Unable to mark notification as read.' });
     }
   });
 

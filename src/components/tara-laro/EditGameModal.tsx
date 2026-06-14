@@ -74,12 +74,12 @@ function RecenterMap({ center }: { center: [number, number] }) {
 }
 
   export const CreateGameModal: React.FC<CreateGameModalProps> = ({
-    onClose,
-    onSubmit,
-    mode = 'create',
-    game,
-    onUpdated,
-  }) => {
+      onClose,
+      onSubmit,
+      mode = 'create',
+      game,
+      onUpdated,
+    }) => {
 
   const { accessToken, user } = useAuth();
   const [form, setForm] = useState<CreateGameFormValues>(initialForm);
@@ -90,16 +90,17 @@ function RecenterMap({ center }: { center: [number, number] }) {
   const [mapCenter, setMapCenter] = useState<[number, number]>([14.676, 121.0437]);
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
 
+
   useEffect(() => {
     if (mode !== 'edit' || !game) return;
   
-    setForm({
+    const nextForm: CreateGameFormValues = {
       title: game.title,
       courtName: game.courtName,
       sport: game.sport,
       date: '',
-      startTime: '',
-      endTime: '',
+      startTime: game.time,
+      endTime: game.endTime,
       location: game.location,
       barangay: game.barangay,
       city: game.city,
@@ -109,19 +110,23 @@ function RecenterMap({ center }: { center: [number, number] }) {
       entryFee: game.entryFee === null ? '' : String(game.entryFee),
       description: game.description ?? '',
       imageUrl: game.imageUrl ?? '',
-    });
+    };
+  
+    setForm(nextForm);
   
     if (game.latitude && game.longitude) {
       setMapCenter([game.latitude, game.longitude]);
     }
   
-    setSelectedDate(null);
+    if (game.date) {
+      setSelectedDate(new Date(game.date));
+    }
   }, [mode, game]);
 
   useEffect(() => {
-    if (mode === 'edit') return;
-  
-    navigator.geolocation?.getCurrentPosition(
+  if (mode === 'edit') return;
+
+  navigator.geolocation?.getCurrentPosition(
       (position) => {
         const coords: [number, number] = [
           position.coords.latitude,
@@ -181,7 +186,11 @@ function RecenterMap({ center }: { center: [number, number] }) {
     }
 
     if (!isOrganizer) {
-      setRequestError('Only organizers and admins can post games.');
+      setRequestError(
+        mode === 'edit'
+          ? 'Only organizers and admins can edit games.'
+          : 'Only organizers and admins can post games.'
+      );
       return;
     }
 
@@ -208,7 +217,13 @@ function RecenterMap({ center }: { center: [number, number] }) {
     try {
       const payload = toCreateGamePayload(form);
     
-      if (mode === 'edit' && game) {
+      if (mode === 'edit') {
+        if (!game) {
+          setRequestError('No game selected for editing.');
+          setIsSubmitting(false);
+          return;
+        }
+    
         const updatedGame = await updateGameRequest(
           accessToken,
           game.id,
@@ -218,7 +233,10 @@ function RecenterMap({ center }: { center: [number, number] }) {
         setSubmitted(true);
     
         setTimeout(() => {
-          onUpdated?.(updatedGame);
+          if (onUpdated) {
+            onUpdated(updatedGame);
+          }
+    
           onClose();
         }, 1200);
       } else {
@@ -230,18 +248,16 @@ function RecenterMap({ center }: { center: [number, number] }) {
         setSubmitted(true);
     
         setTimeout(() => {
-          onSubmit?.(createdGame);
+          if (onSubmit) {
+            onSubmit(createdGame);
+          }
+    
           onClose();
         }, 1200);
       }
     } catch (error) {
-      setRequestError(
-        error instanceof Error
-          ? error.message
-          : mode === 'edit'
-          ? 'Unable to update the game.'
-          : 'Unable to create the game.'
-      );
+
+      setRequestError(error instanceof Error ? error.message : 'Unable to create the game.');
     } finally {
       setIsSubmitting(false);
     }
@@ -260,8 +276,8 @@ function RecenterMap({ center }: { center: [number, number] }) {
   };
 
   return (
-      <div className="fixed inset-0 z-[99999] flex flex-col max-w-md mx-auto" style={{ backgroundColor: '#0D1B2A' }}>
-        <div className="flex items-center justify-between p-5 flex-shrink-0" style={{ borderBottom: '1px solid rgba(245, 239, 224, 0.08)' }}>
+    <div className="fixed inset-0 z-50 flex flex-col max-w-md mx-auto" style={{ backgroundColor: '#0D1B2A' }}>
+      <div className="flex items-center justify-between p-5 flex-shrink-0" style={{ borderBottom: '1px solid rgba(245, 239, 224, 0.08)' }}>
         <div>
           <h2 className="text-xl font-black" style={{ color: '#F5EFE0', fontFamily: "'Bricolage Grotesque', sans-serif" }}>
           {mode === 'edit' ? 'Edit Game' : 'Post a Game'}
@@ -484,6 +500,12 @@ function RecenterMap({ center }: { center: [number, number] }) {
         </div>
 
         <div>
+          <label style={labelStyle}>Entry Fee (PHP)</label>
+          <input style={inputStyle} placeholder="Leave blank for free" type="number" value={form.entryFee} onChange={(e) => handleChange('entryFee', e.target.value)} />
+          {renderFieldError('entryFee')}
+        </div>
+
+        <div>
           <label style={labelStyle}>Image URL (optional)</label>
           <input style={inputStyle} placeholder="https://example.com/game.jpg" value={form.imageUrl || ''} onChange={(e) => handleChange('imageUrl', e.target.value)} />
           {renderFieldError('imageUrl')}
@@ -503,14 +525,26 @@ function RecenterMap({ center }: { center: [number, number] }) {
       </div>
 
       <div className="p-5 flex-shrink-0" style={{ borderTop: '1px solid rgba(245, 239, 224, 0.08)' }}>
-        {submitted ? (
-          <div className="w-full py-4 rounded-2xl flex items-center justify-center gap-2" style={{ backgroundColor: 'rgba(34, 197, 94, 0.15)', border: '1px solid #22C55E' }}>
-            <Check size={20} color="#22C55E" />
-            <span className="font-bold" style={{ color: '#22C55E', fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
-            {mode === 'edit' ? 'Game Updated' : 'Game Posted Securely'}
-            </span>
-          </div>
-        ) : (
+      {submitted ? (
+              <div
+                className="w-full py-4 rounded-2xl flex items-center justify-center gap-2"
+                style={{
+                  backgroundColor: 'rgba(34, 197, 94, 0.15)',
+                  border: '1px solid #22C55E',
+                }}
+              >
+                <Check size={20} color="#22C55E" />
+                <span
+                  className="font-bold"
+                  style={{
+                    color: '#22C55E',
+                    fontFamily: "'Plus Jakarta Sans', sans-serif",
+                  }}
+                >
+                  {mode === 'edit' ? 'Game Updated' : 'Game Posted Securely'}
+                </span>
+              </div>
+            ) : (
           <button
             className="w-full py-4 rounded-2xl font-bold text-base transition-all active:scale-95"
             style={{

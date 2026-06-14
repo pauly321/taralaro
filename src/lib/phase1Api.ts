@@ -12,6 +12,7 @@ type ApiGame = {
   sport: Game['sport'];
   date: string;
   time: string;
+  endTime: string;
   location: string;
   barangay: string;
   city: string;
@@ -52,9 +53,9 @@ const coerceTime = (value: string) => {
 
 const coerceDate = (value: string) => {
   try {
-    return format(parseISO(value), 'EEE, MMM d');
+    return format(parseISO(String(value).slice(0, 10)), 'EEE, MMM d, yyyy');
   } catch {
-    return value;
+    return String(value).slice(0, 15);
   }
 };
 
@@ -62,6 +63,7 @@ const mapGame = (game: ApiGame): Game => ({
   ...game,
   date: coerceDate(game.date),
   time: coerceTime(game.time),
+  endTime: coerceTime(game.endTime),
 });
 
 const requestJson = async <T>(path: string, init?: RequestInit, token?: string | null): Promise<T> => {
@@ -93,6 +95,16 @@ export const fetchMyGames = async (token: string) => {
   return payload.games.map(mapGame);
 };
 
+export const fetchGameById = async (token: string, gameId: string) => {
+  const payload = await requestJson<{ game: ApiGame }>(
+    `/games/${gameId}`,
+    undefined,
+    token
+  );
+
+  return mapGame(payload.game);
+};
+
 export const createGame = async (token: string, body: CreateGamePayload) => {
   const payload = await requestJson<{ game: ApiGame }>(
     '/games',
@@ -104,6 +116,52 @@ export const createGame = async (token: string, body: CreateGamePayload) => {
   );
 
   return mapGame(payload.game);
+};
+
+export const updateGame = async (
+  token: string,
+  gameId: string,
+  payload: CreateGamePayload
+) => {
+  const response = await requestJson<{ game: ApiGame }>(
+    `/games/${gameId}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+    token
+  );
+
+  return mapGame(response.game);
+};
+
+export const fetchGamePlayers = async (token: string, gameId: string) => {
+  const payload = await requestJson<{
+    players: {
+      id: string;
+      userId: string;
+      displayName: string;
+      username: string;
+      city: string;
+      barangay: string;
+      preferredSport: 'basketball' | 'volleyball';
+    }[];
+  }>(`/games/${gameId}/players`, undefined, token);
+
+  return payload.players;
+};
+
+export const markNotificationAsRead = async (
+  token: string,
+  notificationId: string
+) => {
+  return requestJson<{ success: true }>(
+    `/notifications/${notificationId}/read`,
+    {
+      method: 'PATCH',
+    },
+    token
+  );
 };
 
 export const joinGame = async (token: string, gameId: string) => {
@@ -193,4 +251,21 @@ export const logoutSession = async (token?: string | null) => {
     },
     token
   );
+};
+
+export const deleteGame = async (accessToken: string, gameId: string) => {
+  const response = await fetch(`${API_BASE_URL}/games/${gameId}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(payload.message || 'Unable to delete the game.');
+  }
+
+  return payload;
 };
